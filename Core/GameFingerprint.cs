@@ -22,6 +22,11 @@ public static class GameFingerprint
         var managed = Path.Combine(game, "RimWorldWin64_Data", "Managed");
         if (!Directory.Exists(managed)) throw new DirectoryNotFoundException("Не найдена папка Managed игры.");
         AddTree(managed, f => f.EndsWith(".dll", StringComparison.OrdinalIgnoreCase), "managed");
+        Add("native/RimWorldWin64.exe"); Add(ModManager.Hash(Path.Combine(game, "RimWorldWin64.exe")));
+        foreach (var file in Directory.GetFiles(game, "*.dll").OrderBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase))
+        { Add("native/" + Path.GetFileName(file).ToLowerInvariant()); Add(ModManager.Hash(file)); }
+        var mono = Path.Combine(game, "MonoBleedingEdge", "EmbedRuntime");
+        if (Directory.Exists(mono)) AddTree(mono, f => f.EndsWith(".dll", StringComparison.OrdinalIgnoreCase), "mono");
         var folders = new[] { Path.Combine(game, "Data"), Path.Combine(game, "Mods") }.Where(Directory.Exists).SelectMany(Directory.GetDirectories).ToArray();
         var ids = XDocument.Load(configPath).Root?.Element("activeMods")?.Elements("li").Select(e => e.Value.ToLowerInvariant()).ToArray()
             ?? throw new InvalidDataException("Нет списка активных модов.");
@@ -30,7 +35,12 @@ public static class GameFingerprint
             Add("active:" + id);
             var matches = folders.Where(f => ModManager.PackageId(f) == id).ToArray();
             if (matches.Length != 1) throw new InvalidDataException("Для " + id + " найдено папок: " + matches.Length + ". Уберите дубликаты или установите мод локально в Mods.");
-            AddTree(matches[0], f => new[] { ".dll", ".xml" }.Contains(Path.GetExtension(f).ToLowerInvariant()) && !Path.GetRelativePath(matches[0], f).Replace('\\', '/').Contains("/Languages/", StringComparison.OrdinalIgnoreCase), id);
+            AddTree(matches[0], f =>
+            {
+                var relative = Path.GetRelativePath(matches[0], f).Replace('\\', '/');
+                return new[] { ".dll", ".xml" }.Contains(Path.GetExtension(f).ToLowerInvariant()) &&
+                    !relative.StartsWith("Languages/", StringComparison.OrdinalIgnoreCase) && !relative.Contains("/Languages/", StringComparison.OrdinalIgnoreCase);
+            }, id);
         }
         return Convert.ToHexString(hash.GetHashAndReset());
     }

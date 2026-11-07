@@ -11,6 +11,7 @@ void Check(bool value, string message) { if (!value) throw new Exception("FAIL: 
 void Throws(Action action, string message) { try { action(); } catch { Check(true, message); return; } Check(false, message); }
 try
 {
+    GuardBinaryChecks.Run(Check);
     var state = Path.Combine(fixture, "state.json");
     Storage.Write(state, new { Value = 1 }); Storage.Write(state, new { Value = 2 });
     Check(File.ReadAllText(state).Contains('2') && File.ReadAllText(state + ".bak").Contains('1'), "atomic replacement retains previous backup");
@@ -28,7 +29,15 @@ try
     var config = Path.Combine(fixture, "ModsConfig.xml");
     var original = "<ModsConfigData><activeMods><li>zetrith.prepatcher</li><li>ludeon.rimworld</li><li>ludeon.rimworld.odyssey</li><li>hiteke.steam</li><li>rwmt.multiplayer</li><li>custom.mod</li></activeMods></ModsConfigData>";
     File.WriteAllText(config, original);
-    var manager = new ModManager(new HttpClient(), Path.Combine(fixture, "data"), Console.WriteLine);
+    var guardFolder = Path.Combine(fixture, "guard");
+    var guard = new GuardPayload();
+    foreach (var path in GuardPayload.Paths)
+    {
+        var file = Path.Combine(guardFolder, path); Directory.CreateDirectory(Path.GetDirectoryName(file)!);
+        File.WriteAllBytes(file, new byte[200_000]); guard.Files[path] = ModManager.Hash(file);
+    }
+    Storage.Write(Path.Combine(guardFolder, "manifest.json"), guard);
+    var manager = new ModManager(new HttpClient(), Path.Combine(fixture, "data"), Console.WriteLine, guardFolder);
     manager.Install(game, args[0], config);
     var ids = XDocument.Load(config).Descendants("li").Select(e => e.Value).ToArray();
     Check(ids.SequenceEqual(new[] { "zetrith.prepatcher", "ludeon.rimworld", "ludeon.rimworld.odyssey", "rwmt.multiplayer", "custom.mod" }), "Radmin profile preserves other mods and positions Multiplayer after DLC");
@@ -36,6 +45,11 @@ try
     Check(File.Exists(Path.Combine(installed, "1.6", "AssembliesCustom", "Multiplayer.dll")), "official mod installed");
     manager.Install(game, args[0], config);
     Check(Directory.GetDirectories(Path.Combine(game, "Mods")).Count(d => ModManager.PackageId(d) == "rwmt.multiplayer") == 1, "repeat update is idempotent, no duplicate mods");
+    var metadataFile = Directory.GetFiles(Path.Combine(fixture, "data"), "installed-*.json").Single();
+    File.WriteAllText(metadataFile, "{broken"); manager.Install(game, args[0], config);
+    Check(guard.Installed(installed), "corrupt installation metadata repairs from verified guard payload");
+    File.WriteAllText(Path.Combine(installed, GuardPayload.Marker), "{broken"); manager.Install(game, args[0], config);
+    Check(guard.Installed(installed), "corrupt guard marker repairs instead of blocking recovery forever");
     var dll = Path.Combine(installed, "1.6", "AssembliesCustom", "Multiplayer.dll"); File.WriteAllText(dll, "corrupt");
     manager.Install(game, args[0], config);
     Check(new FileInfo(dll).Length > 100_000, "modified DLL detected and repaired from verified archive");
@@ -55,8 +69,15 @@ try
     Check(fingerprint == GameFingerprint.Compute(game, config), "game fingerprint is stable");
     File.AppendAllText(Path.Combine(managed, "Assembly-CSharp.dll"), "modified");
     Check(fingerprint != GameFingerprint.Compute(game, config), "game assembly mismatch detected before joining");
+    var native = Path.Combine(game, "UnityPlayer.dll"); File.WriteAllText(native, "native-runtime-v1");
+    var nativeFingerprint = GameFingerprint.Compute(game, config); File.WriteAllText(native, "native-runtime-v2");
+    Check(nativeFingerprint != GameFingerprint.Compute(game, config), "native runtime mismatch detected before joining");
+    var language = Path.Combine(game, "Data", "Core", "Languages", "Russian", "Keyed"); Directory.CreateDirectory(language);
+    var mechanics = GameFingerprint.Compute(game, config); File.WriteAllText(Path.Combine(language, "text.xml"), "<text>translation</text>");
+    Check(mechanics == GameFingerprint.Compute(game, config), "translation text does not change mechanics fingerprint");
     BundleChecks.Run(Path.Combine(fixture, "bundles"), Check, Throws);
     var checkpoint = Checkpoint.FromReplay(replayPath); checkpoint.Validate();
+    RecoveryChecks.Run(checkpoint, Check, Throws);
     NetworkChecks.Run(checkpoint, Check);
     var server = new MultiplayerServer(new ServerSettings()); checkpoint.Apply(server);
     server.commands.Send(CommandType.PauseAll, -1, -1, []);

@@ -1,0 +1,403 @@
+diff --git a/Source/Client/AsyncTime/AsyncWorldTimeComp.cs b/Source/Client/AsyncTime/AsyncWorldTimeComp.cs
+index 7db59bb..2515c0c 100644
+--- a/Source/Client/AsyncTime/AsyncWorldTimeComp.cs
++++ b/Source/Client/AsyncTime/AsyncWorldTimeComp.cs
+@@ -216,7 +216,8 @@ public class AsyncWorldTimeComp : IExposable, ITickable
+ 
+             if (cmdType == CommandType.CreateJoinPoint)
+             {
+-                LongEventHandler.QueueLongEvent(CreateJoinPointAndSendIfHost, "MpCreatingJoinPoint", false, null);
++                var joinPointId = data.Left == 0 ? 0 : data.ReadInt32();
++                LongEventHandler.QueueLongEvent(() => CreateJoinPointAndSendIfHost(joinPointId), "MpCreatingJoinPoint", false, null);
+             }
+ 
+             if (cmdType == CommandType.InitPlayerData)
+@@ -271,13 +272,14 @@ public class AsyncWorldTimeComp : IExposable, ITickable
+         }
+     }
+ 
+-    private static void CreateJoinPointAndSendIfHost()
++    private static void CreateJoinPointAndSendIfHost(int joinPointId)
+     {
+         Multiplayer.session.dataSnapshot = SaveLoad.CreateGameDataSnapshot(SaveLoad.SaveAndReload(), Multiplayer.GameComp.multifaction);
+ 
+-        if (!TickPatch.Simulating && !Multiplayer.IsReplay &&
+-            (Multiplayer.LocalServer != null || Multiplayer.arbiterInstance))
+-            SaveLoad.SendGameData(Multiplayer.session.dataSnapshot, true);
++        if (RecoveryPolicy.ShouldUpload(TickPatch.Simulating, Multiplayer.IsReplay,
++                Multiplayer.LocalServer != null, Multiplayer.arbiterInstance,
++                Multiplayer.session.isHost))
++            SaveLoad.SendGameData(Multiplayer.session.dataSnapshot, true, joinPointId);
+     }
+ 
+     public void SetTimeEverywhere(TimeSpeed speed)
+diff --git a/Source/Client/Desyncs/SaveableDesyncInfo.cs b/Source/Client/Desyncs/SaveableDesyncInfo.cs
+index 200c3df..12372c9 100644
+--- a/Source/Client/Desyncs/SaveableDesyncInfo.cs
++++ b/Source/Client/Desyncs/SaveableDesyncInfo.cs
+@@ -1,5 +1,6 @@
+ ﻿using System;
+ using System.Diagnostics;
++using System.Collections.Generic;
+ using System.IO;
+ using System.IO.Compression;
+ using System.Linq;
+@@ -28,11 +29,13 @@ public class SaveableDesyncInfo(
+     public readonly ClientSyncOpinion remote = remote;
+     public readonly int diffAt = diffAt;
+     private readonly Task<string> metadata = Task.Run(MetadataGenerator.Generate);
+-    private readonly Task<FileInfo> replay = Task.Run(SaveReplayIfApplicable);
++    private readonly Task<FileInfo> replay = SaveReplayIfApplicable();
+ 
+     public bool ReadyToSave => metadata.IsCompleted && replay.IsCompleted;
+ 
+-    public void Save([CanBeNull] HostInfo hostInfo)
++    public void Save([CanBeNull] HostInfo hostInfo) => TrySave(hostInfo);
++
++    public bool TrySave([CanBeNull] HostInfo hostInfo)
+     {
+         var watch = Stopwatch.StartNew();
+ 
+@@ -46,34 +49,39 @@ public class SaveableDesyncInfo(
+             zip.AddEntry("local_traces.txt", GetLocalTraces());
+             zip.AddEntry("host_traces.txt", hostInfo?.Traces ?? "No host traces");
+ 
+-            zip.AddEntry("local_jitted_methods.txt", JittedMethods.GetJittedMethodsString());
++            try { zip.AddEntry("local_jitted_methods.txt", JittedMethods.GetJittedMethodsString()); }
++            catch (Exception error) { zip.AddEntry("jitted_error.txt", error.ToString()); }
+             zip.AddEntry("host_jitted_methods.txt", hostInfo?.JittedMethods ?? "No host jitted methods");
+ 
+-            var extraLogs = LogGenerator.PrepareLogData();
+-            if (extraLogs != null) zip.AddEntry("local_logs.txt", extraLogs);
+-
+-            zip.AddEntry("local_metadata.txt", metadata.Result);
+-
+             try
+             {
+-                replay.Wait();
+-            }
+-            catch (AggregateException e)
+-            {
+-                if (e.InnerExceptions.SingleOrDefault(inner => inner is TaskCanceledException) == null) throw;
++                var extraLogs = LogGenerator.PrepareLogData();
++                if (extraLogs != null) zip.AddEntry("local_logs.txt", extraLogs);
+             }
+-            if (replay.IsCompletedSuccessfully) {
++            catch (Exception error) { zip.AddEntry("logs_error.txt", error.ToString()); }
++
++            zip.AddEntry("local_metadata.txt", metadata.Status == TaskStatus.RanToCompletion
++                ? metadata.Result : metadata.Exception?.ToString() ?? "Metadata pending; basic report saved without waiting.");
++
++            if (replay.Status == TaskStatus.RanToCompletion) {
+                 var replayFile = replay.Result;
+                 zip.CreateEntryFromFile(replayFile.FullName, "replay.rwmts", CompressionLevel.NoCompression);
+                 DeleteFileSilent(replayFile);
+             }
++            else
++            {
++                zip.AddEntry("replay_status.txt", replay.Exception?.ToString() ?? "Replay optional, cancelled or still pending.");
++                _ = replay.ContinueWith(t => { if (t.Status == TaskStatus.RanToCompletion) DeleteFileSilent(t.Result); else _ = t.Exception; });
++            }
+         }
+         catch (Exception e)
+         {
+             Log.Error($"Exception writing desync info: {e}");
++            return false;
+         }
+ 
+         Log.Message($"Desync info writing took {watch.ElapsedMilliseconds}");
++        return true;
+     }
+ 
+     private string GetLocalTraces()
+@@ -172,10 +180,18 @@ public class SaveableDesyncInfo(
+ 
+         try
+         {
+-            var tmp = new FileInfo(Path.Combine(Multiplayer.DesyncsDir, "desync-replay.tmp.zip"));
++            var tmp = new FileInfo(Path.Combine(Multiplayer.DesyncsDir, "desync-replay-" + Guid.NewGuid().ToString("N") + ".tmp.zip"));
+             if (tmp.Exists) tmp.Delete();
+-            Replay.ForSaving(tmp).WriteData(Multiplayer.session.dataSnapshot);
+-            return Task.FromResult(tmp);
++            // Capture mutable session references before quick rejoin can replace the game.
++            var export = Replay.ForSaving(tmp);
++            var endTick = TickPatch.Timer;
++            var snapshot = Multiplayer.session.dataSnapshot;
++            snapshot = snapshot with
++            {
++                MapData = new Dictionary<int, byte[]>(snapshot.MapData),
++                MapCmds = snapshot.MapCmds.ToDictionary(kv => kv.Key, kv => kv.Value.ToList())
++            };
++            return Task.Run(() => { export.WriteData(snapshot, endTick); return tmp; });
+         }
+         catch (Exception e)
+         {
+diff --git a/Source/Client/MultiplayerStatic.cs b/Source/Client/MultiplayerStatic.cs
+index 49519f9..da35604 100644
+--- a/Source/Client/MultiplayerStatic.cs
++++ b/Source/Client/MultiplayerStatic.cs
+@@ -75,6 +75,7 @@ namespace Multiplayer.Client
+             }
+ 
+             Log.Message($"Multiplayer version {MpVersion.Version}");
++            Log.Message("RimTogether Guard rt-guard1 active; protocol 5401; RNG and recovery guards enabled.");
+             Log.Message($"Arch: {RuntimeInformation.ProcessArchitecture}/OS: {RuntimeInformation.OSArchitecture}");
+             Log.Message($"Player's username: {Multiplayer.username}");
+ 
+diff --git a/Source/Client/Networking/State/ClientJoiningState.cs b/Source/Client/Networking/State/ClientJoiningState.cs
+index d3297ae..8c551f0 100644
+--- a/Source/Client/Networking/State/ClientJoiningState.cs
++++ b/Source/Client/Networking/State/ClientJoiningState.cs
+@@ -73,6 +73,7 @@ namespace Multiplayer.Client
+         {
+             Multiplayer.session.gameName = packet.gameName;
+             Multiplayer.session.playerId = packet.playerId;
++            Multiplayer.session.isHost = packet.isHost;
+ 
+             var remoteInfo = new RemoteData
+             {
+diff --git a/Source/Client/Patches/Seeds.cs b/Source/Client/Patches/Seeds.cs
+index 373af28..98de49d 100644
+--- a/Source/Client/Patches/Seeds.cs
++++ b/Source/Client/Patches/Seeds.cs
+@@ -6,6 +6,7 @@ using System.Collections.Generic;
+ using System.Reflection;
+ using System.Reflection.Emit;
+ using Multiplayer.Client.Util;
++using RimWorld.QuestGen;
+ using Verse;
+ using Verse.Grammar;
+ 
+@@ -168,6 +169,14 @@ namespace Multiplayer.Client
+             yield return AccessTools.Method(typeof(GrammarResolver), nameof(GrammarResolver.Resolve));
+             yield return AccessTools.Method(typeof(PawnBioAndNameGenerator), nameof(PawnBioAndNameGenerator.GeneratePawnName));
+             yield return AccessTools.Method(typeof(NameGenerator), nameof(NameGenerator.GenerateName), [typeof(RulePackDef), typeof(Predicate<string>), typeof(bool), typeof(string), typeof(string), typeof(List<Rule>)]);
++            // The GrammarRequest overload holds the validator retry loop and is called directly
++            // (bypassing the RulePackDef overload above) by quest naming among others; a validator
++            // rejection count depends on the generated text and therefore on the client's language.
++            yield return AccessTools.Method(typeof(NameGenerator), nameof(NameGenerator.GenerateName), [typeof(GrammarRequest), typeof(Predicate<string>), typeof(bool), typeof(string), typeof(string)]);
++            // Quest naming additionally retries whole NameGenerator calls while the name collides
++            // with an existing quest's name — wrap the outer loop too so quest naming costs exactly
++            // one synced draw regardless of language or collisions.
++            yield return AccessTools.Method(typeof(QuestNode_ResolveQuestName), nameof(QuestNode_ResolveQuestName.Resolve));
+         }
+ 
+         [HarmonyPriority(MpPriority.MpFirst)]
+@@ -179,7 +188,7 @@ namespace Multiplayer.Client
+         }
+ 
+         [HarmonyPriority(MpPriority.MpLast)]
+-        static void Postfix(bool __state)
++        static void Finalizer(bool __state)
+         {
+             if (__state)
+                 Rand.PopState();
+@@ -235,4 +244,34 @@ namespace Multiplayer.Client
+         }
+     }
+ 
++    [HarmonyPatch(typeof(RitualBehaviorWorker_GravshipLaunch), nameof(RitualBehaviorWorker_GravshipLaunch.CanReachGravship))]
++    static class SeedGravshipCanReachGravship
++    {
++        static void Prefix(ref bool __state)
++        {
++            if (Multiplayer.Client == null) return;
++
++            // The gravship launch confirmation dialog works out which pawns can board while it is being
++            // built: Dialog_BeginRitual's constructor calls CreateRitualRoleAssignments ->
++            // RitualRoleAssignments.PawnNotAssignableReason -> RitualBehaviorWorker_GravshipLaunch
++            // .PawnCanFillRole -> CanReachGravship -> GravshipUtility.TryFindSpotOnGravship ->
++            // Region.RandomCell, which consumes RNG. Building that dialog is UI work and, because the
++            // dialog is opened only by the issuing peer (see CancelDialogBeginRitual's
++            // currentExecutingCmdIssuedBySelf gate), it runs on just one peer - so this RNG must not
++            // advance the shared stream. Spamming the launch button repeats it and the divergence
++            // accumulates into a desync ("Random state from commands doesn't match").
++            // CanReachGravship returns a bool that does not depend on the RNG (it only searches for any
++            // allowed cell), and the real boarding calls TryFindSpotOnGravship outside this check, so
++            // isolating the RNG here leaves both the check result and determinism intact.
++            Rand.PushState();
++            __state = true;
++        }
++
++        static void Finalizer(bool __state)
++        {
++            if (__state)
++                Rand.PopState();
++        }
++    }
++
+ }
+diff --git a/Source/Client/Saving/Loader.cs b/Source/Client/Saving/Loader.cs
+index 74e5c00..d16947e 100644
+--- a/Source/Client/Saving/Loader.cs
++++ b/Source/Client/Saving/Loader.cs
+@@ -69,6 +69,7 @@ public static class Loader
+         };
+ 
+         Multiplayer.session.replayTimerStart = TickPatch.Timer;
++        Multiplayer.GameComp.logDesyncTraces = true;
+ 
+         Multiplayer.game.ChangeRealPlayerFaction(
+             Find.FactionManager.GetById(Multiplayer.session.myFactionId) ?? Multiplayer.WorldComp.spectatorFaction
+diff --git a/Source/Client/Saving/Replay.cs b/Source/Client/Saving/Replay.cs
+index 19587f8..ba3baa4 100644
+--- a/Source/Client/Saving/Replay.cs
++++ b/Source/Client/Saving/Replay.cs
+@@ -25,7 +25,9 @@ namespace Multiplayer.Client
+ 
+         public void WriteCurrentData() => WriteData(Multiplayer.session.dataSnapshot);
+ 
+-        public void WriteData(GameDataSnapshot gameData)
++        public void WriteData(GameDataSnapshot gameData) => WriteData(gameData, TickPatch.Timer);
++
++        public void WriteData(GameDataSnapshot gameData, int endTick)
+         {
+             string sectionId = info.sections.Count.ToString("D3");
+             using var zip = CreateZipWrite();
+@@ -41,7 +43,7 @@ namespace Multiplayer.Client
+                 zip.AddEntry($"world/{sectionId}_cmds", ScheduledCommand.SerializeCmds(worldCmds));
+ 
+             zip.AddEntry($"world/{sectionId}_save", gameData.GameData);
+-            info.sections.Add(new ReplaySection(gameData.CachedAtTime, TickPatch.Timer));
++            info.sections.Add(new ReplaySection(gameData.CachedAtTime, endTick));
+ 
+             zip.AddEntry("info", ReplayInfo.Write(info));
+         }
+diff --git a/Source/Client/Saving/SaveLoad.cs b/Source/Client/Saving/SaveLoad.cs
+index 37f5ab6..436e328 100644
+--- a/Source/Client/Saving/SaveLoad.cs
++++ b/Source/Client/Saving/SaveLoad.cs
+@@ -210,8 +210,11 @@ namespace Multiplayer.Client
+             );
+         }
+ 
+-        public static void SendGameData(GameDataSnapshot snapshot, bool async)
++        public static void SendGameData(GameDataSnapshot snapshot, bool async) => SendGameData(snapshot, async, 0);
++
++        public static void SendGameData(GameDataSnapshot snapshot, bool async, int joinPointId)
+         {
++            var recipient = Multiplayer.Client;
+             var mapsData = new Dictionary<int, byte[]>(snapshot.MapData);
+             var gameData = snapshot.GameData;
+             var sessionData = snapshot.SessionData;
+@@ -220,6 +223,8 @@ namespace Multiplayer.Client
+             {
+                 var writer = new ByteWriter();
+ 
++                writer.WriteInt32(joinPointId);
++
+                 writer.WriteInt32(mapsData.Count);
+                 foreach (var mapData in mapsData)
+                 {
+@@ -232,7 +237,11 @@ namespace Multiplayer.Client
+ 
+                 byte[] data = writer.ToArray();
+ 
+-                OnMainThread.Enqueue(() => Multiplayer.Client?.SendFragmented(Packets.Client_WorldDataUpload, data));
++                OnMainThread.Enqueue(() =>
++                {
++                    if (recipient != null && recipient == Multiplayer.Client && recipient.State == ConnectionStateEnum.ClientPlaying)
++                        recipient.SendFragmented(Packets.Client_WorldDataUpload, data);
++                });
+             };
+ 
+             if (async)
+diff --git a/Source/Client/Session/MultiplayerSession.cs b/Source/Client/Session/MultiplayerSession.cs
+index 262b2bf..a52cbf8 100644
+--- a/Source/Client/Session/MultiplayerSession.cs
++++ b/Source/Client/Session/MultiplayerSession.cs
+@@ -16,6 +16,7 @@ namespace Multiplayer.Client
+     {
+         public string gameName;
+         public int playerId;
++        public bool isHost;
+ 
+         public int receivedCmds;
+         public int remoteTickUntil;
+diff --git a/Source/Client/Session/RimTogetherRecovery.cs b/Source/Client/Session/RimTogetherRecovery.cs
+new file mode 100644
+index 0000000..45e62de
+--- /dev/null
++++ b/Source/Client/Session/RimTogetherRecovery.cs
+@@ -0,0 +1,23 @@
++using System;
++using Multiplayer.Common;
++using Verse;
++
++namespace Multiplayer.Client;
++
++public static class RimTogetherRecovery
++{
++    private static ConnectionBase connection;
++    private static AutoRecoveryBudget budget = new();
++
++    public static bool TryBeginAutoRecovery(double seconds)
++    {
++        if (Environment.GetEnvironmentVariable("RIMTOGETHER_FAST_RESYNC") != "1" ||
++            Multiplayer.session == null || Multiplayer.session.isHost || Multiplayer.LocalServer != null || Multiplayer.arbiterInstance) return false;
++        if (connection != Multiplayer.Client)
++        { connection = Multiplayer.Client; budget = new AutoRecoveryBudget(); }
++        if (connection == null || Multiplayer.IsReplay || connection.State != ConnectionStateEnum.ClientPlaying) return false;
++        if (budget.TryAcquire(seconds)) return true;
++        Log.Warning("RimTogether: repeated desync; automatic recovery disabled for this connection. Report retained; manual resync remains available.");
++        return false;
++    }
++}
+diff --git a/Source/Client/Windows/DesyncedWindow.cs b/Source/Client/Windows/DesyncedWindow.cs
+index addc12e..2dfa7be 100644
+--- a/Source/Client/Windows/DesyncedWindow.cs
++++ b/Source/Client/Windows/DesyncedWindow.cs
+@@ -18,6 +18,8 @@ namespace Multiplayer.Client
+         private readonly SaveableDesyncInfo desyncInfo;
+         private float openedAt;
+         private bool infoWritten;
++        private bool reportAttempted;
++        private bool autoRecoveryChecked;
+         private bool rejoining;
+         [CanBeNull] private SaveableDesyncInfo.HostInfo hostInfo;
+ 
+@@ -57,9 +59,8 @@ namespace Multiplayer.Client
+             float x = 0;
+             if (Widgets.ButtonText(new Rect(x, 0, 120, 35), "MpTryResync".Translate()) && !rejoining)
+             {
+-                rejoining = true;
+-                Log.Message("Multiplayer: requesting rejoin");
+-                Rejoiner.DoRejoin();
++                WriteReport();
++                TryRejoin();
+             }
+ 
+             x += 120 + 10;
+@@ -103,11 +104,29 @@ namespace Multiplayer.Client
+             const float maxWait = 5f;
+ 
+             var shouldWrite = hostInfo != null || Time.realtimeSinceStartup - openedAt > maxWait;
+-            if (!infoWritten && shouldWrite && desyncInfo.ReadyToSave)
++            if (!reportAttempted && shouldWrite && (desyncInfo.ReadyToSave || Time.realtimeSinceStartup - openedAt > maxWait))
+             {
+-                desyncInfo.Save(hostInfo);
+-                infoWritten = true;
++                WriteReport();
+             }
++            if (reportAttempted && !autoRecoveryChecked && !rejoining && Time.realtimeSinceStartup - openedAt > maxWait)
++            {
++                autoRecoveryChecked = true;
++                if (RimTogetherRecovery.TryBeginAutoRecovery(Time.realtimeSinceStartup)) TryRejoin();
++            }
++        }
++
++        private void WriteReport()
++        {
++            if (reportAttempted) return;
++            reportAttempted = true;
++            infoWritten = desyncInfo.TrySave(hostInfo);
++        }
++
++        private void TryRejoin()
++        {
++            if (rejoining) return;
++            try { rejoining = true; Log.Message("RimTogether: requesting verified world reload"); Rejoiner.DoRejoin(); }
++            catch (System.Exception error) { rejoining = false; Log.Error("RimTogether resync failed: " + error); }
+         }
+     }
+ 

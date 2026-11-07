@@ -23,6 +23,8 @@ def session(expected=None):
             line = lines.get(timeout=3)
             if line.startswith('READY '):
                 if expected is not None and f'tick={expected}' not in line: raise AssertionError(line)
+                backup = folder / 'world/checkpoint.json.bak'
+                if backup.exists(): json.loads(backup.read_text(encoding='utf-8'))
                 break
         else: raise AssertionError('No READY')
         process.stdin.write('save\nstop\n'); process.stdin.flush()

@@ -6,7 +6,7 @@ using System.Xml.Linq;
 
 namespace RimTogether;
 
-public sealed class ModManager(HttpClient http, string dataRoot, Action<string> log)
+public sealed class ModManager(HttpClient http, string dataRoot, Action<string> log, string? guardFolder = null)
 {
     public static void RequireIdle()
     {
@@ -100,6 +100,8 @@ public sealed class ModManager(HttpClient http, string dataRoot, Action<string> 
     public void Install(string game, string archive, string configPath)
     {
         RequireIdle(); ValidateGame(game);
+        var payloadRoot = guardFolder ?? Path.Combine(AppContext.BaseDirectory, "packages", "guard");
+        var guard = GuardPayload.Load(payloadRoot);
         var mods = Path.Combine(game, "Mods");
         Directory.CreateDirectory(mods);
         var existing = Directory.GetDirectories(mods).Where(p => PackageId(p) == "rwmt.multiplayer").ToArray();
@@ -108,16 +110,21 @@ public sealed class ModManager(HttpClient http, string dataRoot, Action<string> 
         var destination = Path.Combine(mods, "RimTogether-Multiplayer");
         if (Directory.Exists(destination) && !existing.Contains(destination, StringComparer.OrdinalIgnoreCase))
             throw new IOException("Папка RimTogether-Multiplayer занята другим модом.");
-        var state = Path.Combine(dataRoot, "installed-" + Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(game).ToUpperInvariant())))[..12] + ".json");
+        var state = Path.Combine(dataRoot, "installed-" + Contract.GuardRevision + "-" + Convert.ToHexString(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(Path.GetFullPath(game).ToUpperInvariant())))[..12] + ".json");
         var backup = Path.Combine(dataRoot, "backups", DateTime.UtcNow.ToString("yyyyMMdd-HHmmss-ffff"));
         // Content hashes detect changes and incomplete installations, not just version text.
         var healthy = false;
         if (existing.Length == 1 && existing[0].Equals(destination, StringComparison.OrdinalIgnoreCase) && File.Exists(state))
         {
-            var hashes = Storage.Read<Dictionary<string, string>>(state);
-            healthy = hashes.Count > 0 && hashes.All(kv => File.Exists(Path.Combine(destination, kv.Key)) && Hash(Path.Combine(destination, kv.Key)) == kv.Value)
-                && Directory.GetFiles(destination, "*", SearchOption.AllDirectories).Length == hashes.Count;
+            try
+            {
+                var hashes = Storage.Read<Dictionary<string, string>>(state);
+                healthy = hashes.Count > 0 && hashes.All(kv => File.Exists(Path.Combine(destination, kv.Key)) && Hash(Path.Combine(destination, kv.Key)) == kv.Value)
+                    && Directory.GetFiles(destination, "*", SearchOption.AllDirectories).Length == hashes.Count;
+            }
+            catch (JsonException) { log("Метаданные установки повреждены; восстанавливаем из проверенного комплекта."); }
         }
+        healthy = healthy && guard.Installed(destination);
         if (healthy)
         {
             PrepareConfig(game, configPath, backup);
@@ -132,6 +139,7 @@ public sealed class ModManager(HttpClient http, string dataRoot, Action<string> 
             var incoming = Path.Combine(staging, "Multiplayer");
             if (PackageId(incoming) != "rwmt.multiplayer" || !File.Exists(Path.Combine(incoming, "1.6", "AssembliesCustom", "Multiplayer.dll")))
                 throw new InvalidDataException("Структура архива Multiplayer не распознана.");
+            guard.Apply(payloadRoot, incoming);
             Directory.CreateDirectory(backup);
             foreach (var old in existing)
             {

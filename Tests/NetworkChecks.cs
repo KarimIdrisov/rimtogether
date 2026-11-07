@@ -21,7 +21,7 @@ public static class NetworkChecks
         var clients = new List<Probe>();
         Probe Connect(string name, string password)
         {
-            var probe = new Probe(name, password); clients.Add(probe); probe.Manager.Start(); probe.Manager.Connect("127.0.0.1", port, ""); return probe;
+            var probe = new Probe(name, password, checkpoint); clients.Add(probe); probe.Manager.Start(); probe.Manager.Connect("127.0.0.1", port, ""); return probe;
         }
         void Until(Func<bool> condition)
         {
@@ -34,9 +34,20 @@ public static class NetworkChecks
         {
             var wrong = Connect("Wrong", "incorrect"); Until(() => wrong.Disconnected);
             check(!wrong.Authenticated, "UDP server rejects incorrect password");
+            var early = Connect("BeforeHost", "test-password"); Until(() => early.Disconnected);
+            check(!early.Authenticated, "friend cannot seed server settings before authoritative host enters");
             var first = Connect("Alpha", "test-password"); Until(() => first.Authenticated);
             var second = Connect("Bravo", "test-password"); Until(() => second.Authenticated);
             check(first.Authenticated && second.Authenticated, "two clients authenticate and receive full world data over UDP");
+            Until(() => server.playerManager.Players.Count(p => p.status == PlayerStatus.Playing) == 2);
+            check(first.IsHost && !second.IsHost, "server grants authority to actual host rather than a client role flag");
+            var generation = server.worldData.SnapshotGeneration;
+            server.Enqueue(() => server.worldData.TryStartJoinPointCreation(true));
+            Until(() => server.worldData.SnapshotGeneration > generation);
+            check(!server.worldData.CreatingJoinPoint, "dedicated snapshot request completes through numbered owner upload over UDP");
+            var transfers = second.WorldTransfers;
+            second.RequestRejoin(); Until(() => second.WorldTransfers > transfers);
+            check(second.WorldTransfers == transfers + 1, "friend reloads newest world over existing UDP connection without reconnecting server");
             var third = Connect("Third", "test-password"); Until(() => third.Disconnected);
             check(!third.Authenticated && third.Reason == DisconnectReason.ConnectionRejected, "third client explicitly rejected by two-player limit");
         }
@@ -54,14 +65,18 @@ public class Probe
     public bool Authenticated;
     public bool Disconnected;
     public DisconnectReason Reason;
-    public Probe(string name, string password)
+    public bool IsHost;
+    public int WorldTransfers;
+    private LiteNetConnection? connection;
+    public void RequestRejoin() => connection!.Send(Packets.Client_RequestRejoin);
+    public Probe(string name, string password, Checkpoint checkpoint)
     {
         var listener = new EventBasedNetListener();
-        LiteNetConnection? connection = null;
         listener.PeerConnectedEvent += peer =>
         {
             connection = new LiteNetConnection(peer) { username = name, Lenient = true };
-            connection.ChangeState(new ProbeState(connection, password, () => Authenticated = true));
+            connection.ChangeState(new ProbeState(connection, password, host => IsHost = host,
+                () => { Authenticated = true; WorldTransfers++; }, checkpoint));
         };
         listener.PeerDisconnectedEvent += (_, info) => { Reason = info.Reason; Disconnected = true; };
         listener.NetworkReceiveEvent += (_, reader, _, method) =>
@@ -70,18 +85,34 @@ public class Probe
     }
 }
 
-public class ProbeState(ConnectionBase connection, string password, Action authenticated) : AsyncConnectionState(connection)
+public class ProbeState(ConnectionBase connection, string password, Action<bool> authority, Action authenticated, Checkpoint checkpoint) : AsyncConnectionState(connection)
 {
+    private bool host;
     [PacketHandler(Packets.Server_PlayerList)]
     public void Players(ByteReader packet) => packet.Seek(packet.Length);
     [PacketHandler(Packets.Server_TimeControl)]
     public void Time(ByteReader packet) => packet.Seek(packet.Length);
     [PacketHandler(Packets.Server_KeepAlive)]
-    public void KeepAlive(ByteReader packet) => packet.Seek(packet.Length);
+    public void KeepAlive(ByteReader packet)
+    {
+        var id = packet.ReadInt32();
+        connection.Send(new ClientKeepAlivePacket(id, 0, false, 100));
+    }
     [PacketHandler(Packets.Server_Command)]
-    public void Command(ByteReader packet) => packet.Seek(packet.Length);
+    public void Command(ByteReader reader)
+    {
+        var packet = new ServerCommandPacket(); packet.Bind(new PacketReader(reader));
+        if (packet.type != CommandType.CreateJoinPoint || !host) return;
+        var id = new ByteReader(packet.data ?? throw new InvalidDataException("Missing joinpoint token")).ReadInt32();
+        var writer = new ByteWriter(); writer.WriteInt32(id); writer.WriteInt32(checkpoint.Maps.Count);
+        foreach (var map in checkpoint.Maps) { writer.WriteInt32(map.Key); writer.WritePrefixedBytes(map.Value); }
+        writer.WritePrefixedBytes(checkpoint.World); writer.WritePrefixedBytes(checkpoint.Session);
+        connection.SendFragmented(Packets.Client_WorldDataUpload, writer.ToArray());
+    }
     [PacketHandler(Packets.Server_Chat)]
     public void Chat(ByteReader packet) => packet.Seek(packet.Length);
+    [PacketHandler(Packets.Server_Notification)]
+    public void Notification(ByteReader packet) => packet.Seek(packet.Length);
     protected override async Task RunState()
     {
         connection.Send(ClientProtocolPacket.Current()); await TypedPacket<ServerProtocolOkPacket>();
@@ -95,10 +126,13 @@ public class ProbeState(ConnectionBase connection, string password, Action authe
         var packet = await Packet(Packets.Server_UsernameOk); packet.Seek(packet.Length);
         connection.Send(new ClientJoinDataPacket { modCtorRoundMode = RoundModeEnum.ToNearest,
             staticCtorRoundMode = RoundModeEnum.ToNearest, defInfos = [] });
-        await TypedPacket<ServerJoinDataPacket>();
+        var join = await TypedPacket<ServerJoinDataPacket>(); host = join.isHost; authority(host);
         connection.Send(Packets.Client_WorldRequest);
-        packet = await Packet(Packets.Server_WorldDataStart); packet.Seek(packet.Length);
-        packet = await Packet(Packets.Server_WorldData).Fragmented(); packet.Seek(packet.Length);
-        authenticated();
+        while (alive)
+        {
+            packet = await Packet(Packets.Server_WorldDataStart); packet.Seek(packet.Length);
+            packet = await Packet(Packets.Server_WorldData).Fragmented(); packet.Seek(packet.Length);
+            connection.Send(Packets.Client_WorldReady); authenticated();
+        }
     }
 }

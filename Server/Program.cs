@@ -2,7 +2,7 @@ using System.Net;
 using Multiplayer.Common;
 using RimTogether;
 
-// The server uses official Common v0.11.5 with a local player-limit check fix.
+// The server uses pinned Common v0.11.5 plus the paired RimTogether Guard patches.
 // This host adds durable checkpoints, a bounded two-player configuration and clean shutdown.
 if (args.Length != 1) { Console.Error.WriteLine("Usage: RimTogether.Server.exe <server-config.json>"); return 2; }
 try
@@ -40,17 +40,33 @@ try
     if (!LiteNetManager.Create(server, endpoints.ToArray(), out var manager))
     { manager.Stop(); throw new IOException("Не удалось занять UDP 30502. Проверь IP Radmin и другой запущенный сервер."); }
     server.netManagers.Add(manager);
-    Storage.Write(stateFile, checkpoint);
+    // Preserve a healthy recovered backup instead of backing up corrupt primary bytes.
+    Storage.Write(stateFile, checkpoint, keepRawBackup: false);
     var thread = new Thread(server.Run) { Name = "RimTogether server" };
     thread.Start();
+    var recovery = new RecoveryCoordinator(server, config.FastRecovery, Console.WriteLine);
+    int lastPersistedGeneration = server.worldData.SnapshotGeneration;
+    int lastPersistAt = server.NetTimer;
     void Persist()
     {
         if (server.worldData.CreatingJoinPoint) { Console.WriteLine("CHECKPOINT WAIT: joinpoint in progress; previous checkpoint retained"); return; }
         var state = Checkpoint.Capture(server); state.Validate(); Storage.Write(stateFile, state);
         Console.WriteLine("CHECKPOINT OK tick=" + state.Tick);
     }
-    using var timer = new Timer(_ => server.Enqueue(() => { try { Persist(); } catch (Exception e) { Console.WriteLine("CHECKPOINT ERROR: " + e.Message); } }), null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
-    Console.WriteLine("READY " + config.HostAddress + ":30502 version=" + Contract.Version + " tick=" + server.gameTimer);
+    using var timer = new Timer(_ => server.Enqueue(() =>
+    {
+        try
+        {
+            recovery.Tick();
+            if (server.worldData.SnapshotGeneration != lastPersistedGeneration || server.NetTimer - lastPersistAt >= MultiplayerServer.NetTicksPerSecond * 30)
+            {
+                Persist(); lastPersistAt = server.NetTimer;
+                lastPersistedGeneration = server.worldData.SnapshotGeneration;
+            }
+        }
+        catch (Exception e) { Console.WriteLine("CHECKPOINT ERROR: " + e.Message); }
+    }), null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+    Console.WriteLine("READY " + config.HostAddress + ":30502 version=" + Contract.Version + " guard=" + Contract.GuardRevision + " protocol=" + Contract.Protocol + " tick=" + server.gameTimer);
     // A disconnected launcher pipe is a clean-stop request, not an infinite busy loop.
     var serverDone = Task.Run(() => thread.Join());
     while (server.running)
@@ -60,14 +76,14 @@ try
         var line = await input;
         if (line == null || line.Equals("stop", StringComparison.OrdinalIgnoreCase))
         {
-            server.Enqueue(() => { try { Persist(); } finally { server.running = false; } });
+            server.Enqueue(() => { try { server.worldData.AbortJoinPointCreation(); Persist(); } finally { server.running = false; } });
             break;
         }
         if (line == "save") server.Enqueue(Persist);
     }
     thread.Join();
     // Includes /stop requested by the in-game host; the networking thread is stopped now.
-    Persist();
+    server.worldData.AbortJoinPointCreation(); Persist();
     Console.WriteLine("STOPPED"); return 0;
 }
 catch (Exception e) { Console.Error.WriteLine("SERVER ERROR: " + e); return 1; }

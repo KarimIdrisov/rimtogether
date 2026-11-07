@@ -43,8 +43,8 @@ public partial class MainWindow : Window
         }
         Role.SelectedIndex = settings.IsHost ? 0 : 1;
         Username.Text = settings.Username; HostAddress.Text = settings.HostAddress; GamePath.Text = settings.GamePath;
-        ServerPassword.Password = settings.Password; ReplayPath.Text = settings.SeedReplay; AutoUpdate.IsChecked = settings.AutoUpdate;
-        Log("RimTogether " + typeof(MainWindow).Assembly.GetName().Version?.ToString(3) + " • комплект " + Contract.Tag + ". Сервер работает, пока включён ПК хоста.");
+        ServerPassword.Password = settings.Password; ReplayPath.Text = settings.SeedReplay; AutoUpdate.IsChecked = settings.AutoUpdate; FastRecovery.IsChecked = settings.FastRecovery;
+        Log("RimTogether " + typeof(MainWindow).Assembly.GetName().Version?.ToString(3) + " • " + Contract.GuardRevision + " / protocol " + Contract.Protocol + ". Сервер работает, пока включён ПК хоста.");
         Log("Другу: https://github.com/" + BundleUpdate.Repository + "/releases/latest — скачать RimTogether.Start.exe один раз. Дальше обновления при запуске.");
         Log("Сервер хранит контрольную точку каждые 30 секунд. Закрытие лаунчера останавливает сервер.");
         Log("Подготовка профиля отключает hiteke.steam, ставит Prepatcher и Multiplayer в нужный порядок. Исходный конфиг сохраняется.");
@@ -65,7 +65,7 @@ public partial class MainWindow : Window
         if (ServerPassword.Password.Length < 6) throw new InvalidOperationException("Пароль должен содержать минимум 6 символов.");
         var result = new Settings { IsHost = Role.SelectedIndex == 0, GamePath = GamePath.Text.Trim(), Username = Username.Text.Trim(),
             HostAddress = ip.ToString(), Password = ServerPassword.Password, SeedReplay = ReplayPath.Text.Trim(), AutoUpdate = AutoUpdate.IsChecked == true,
-            LastFingerprint = settings.LastFingerprint, ExpectedFingerprint = settings.ExpectedFingerprint };
+            LastFingerprint = settings.LastFingerprint, ExpectedFingerprint = settings.ExpectedFingerprint, FastRecovery = FastRecovery.IsChecked == true };
         Storage.Write(SettingsPath, result); settings = result; return result;
     }
     private async Task Run(Func<Task> action)
@@ -80,12 +80,17 @@ public partial class MainWindow : Window
         var running = server != null && !server.HasExited;
         PlayButton.IsEnabled = true; StartButton.IsEnabled = Role.SelectedIndex == 0 && !running;
         StopButton.IsEnabled = running;
+        FastRecovery.Content = Role.SelectedIndex == 0
+            ? "Быстрый синк хоста: свежая точка мира примерно каждые 90 секунд"
+            : "Быстрый синк друга: одна автоматическая попытка восстановления";
         Role.IsEnabled = Username.IsEnabled = HostAddress.IsEnabled = ServerPassword.IsEnabled = GamePath.IsEnabled = ReplayPath.IsEnabled = !running;
-        if (Summary != null) Summary.Text = "Multiplayer " + Contract.Version + " • UDP 30502 • " + (running ? (serverReady ? "сервер работает" : "сервер запускается") : "сервер остановлен");
+        if (Summary != null) Summary.Text = Contract.GuardRevision + " • Multiplayer " + Contract.Version + " • UDP 30502 • " + (running ? (serverReady ? "сервер работает" : "сервер запускается") : "сервер остановлен");
     }
     private async Task Prepare(Settings config, bool force = false)
     {
         ModManager.RequireIdle(); ModManager.ValidateGame(config.GamePath);
+        if (!config.IsHost && config.ExpectedFingerprint.Length == 0)
+            throw new InvalidOperationException("Сначала вставь приглашение хоста: нужна сверка файлов и версии Guard.");
         if (server != null && !server.HasExited) return;
         var manager = new ModManager(http, root, Log);
         var configPath = Path.Combine(Contract.GameData, "Config", "ModsConfig.xml");
@@ -98,7 +103,7 @@ public partial class MainWindow : Window
         else
         {
             var installed = Path.Combine(config.GamePath, "Mods", "RimTogether-Multiplayer", "About", "About.xml");
-            if (!File.Exists(installed) || !File.ReadAllText(installed).Contains("0.11.5"))
+            if (!File.Exists(installed) || !GuardPayload.Load(Path.Combine(AppContext.BaseDirectory, "packages", "guard")).Installed(Path.GetDirectoryName(Path.GetDirectoryName(installed)!)!))
                 throw new InvalidOperationException("Сначала нажми «Проверить обновления» для установки совместимого мода.");
         }
         var fingerprint = await Task.Run(() => GameFingerprint.Compute(config.GamePath, configPath));
@@ -156,6 +161,8 @@ public partial class MainWindow : Window
         var endpoint = (config.IsHost ? "127.0.0.1" : config.HostAddress) + ":30502";
         var start = new ProcessStartInfo(Path.Combine(config.GamePath, "RimWorldWin64.exe")) { WorkingDirectory = config.GamePath, UseShellExecute = false };
         start.ArgumentList.Add("-connect=" + endpoint); start.ArgumentList.Add("-username=" + config.Username);
+        start.Environment["RIMTOGETHER_ROLE"] = config.IsHost ? "host" : "friend";
+        start.Environment["RIMTOGETHER_FAST_RESYNC"] = config.FastRecovery ? "1" : "0";
         Process.Start(start); Log("Игра запущена. Пароль сервера вводится в RimWorld; адрес " + endpoint + ".");
     });
     private async void StartServer_Click(object sender, RoutedEventArgs e) => await Run(async () => { var config = ReadForm(); await Prepare(config); await StartServer(config); });
@@ -170,8 +177,9 @@ public partial class MainWindow : Window
     private async void Invite_Click(object sender, RoutedEventArgs e) => await Run(async () =>
     {
         var config = ReadForm();
-        if (config.LastFingerprint.Length == 0) await Prepare(config, true);
-        Clipboard.SetText(JsonSerializer.Serialize(new Invitation(1, Contract.Tag, config.HostAddress, config.Password, config.LastFingerprint)));
+        if (!config.IsHost) throw new InvalidOperationException("Приглашение создаёт хост.");
+        if (server == null || server.HasExited || config.LastFingerprint.Length == 0) await Prepare(config, true);
+        Clipboard.SetText(JsonSerializer.Serialize(new Invitation(1, Contract.Tag, config.HostAddress, config.Password, config.LastFingerprint, Contract.GuardRevision)));
         Log("Приглашение скопировано с контрольной суммой файлов. Оно содержит пароль: передай только другу. Друг нажимает «Вставить приглашение».");
     });
     private void Import_Click(object sender, RoutedEventArgs e)
@@ -179,7 +187,7 @@ public partial class MainWindow : Window
         try
         {
             var invite = JsonSerializer.Deserialize<Invitation>(Clipboard.GetText()) ?? throw new InvalidDataException("Пустое приглашение.");
-            if (invite.Schema != 1 || invite.Tag != Contract.Tag || !IPAddress.TryParse(invite.Address, out _) || invite.Password.Length < 6 || !Regex.IsMatch(invite.Fingerprint ?? "", "^[A-F0-9]{64}$"))
+            if (invite.Schema != 1 || invite.Tag != Contract.Tag || invite.GuardRevision != Contract.GuardRevision || !IPAddress.TryParse(invite.Address, out _) || invite.Password.Length < 6 || !Regex.IsMatch(invite.Fingerprint ?? "", "^[A-F0-9]{64}$"))
                 throw new InvalidDataException("Приглашение несовместимо. Используйте один комплект лаунчера.");
             HostAddress.Text = invite.Address; ServerPassword.Password = invite.Password; Role.SelectedIndex = 1;
             settings.ExpectedFingerprint = invite.Fingerprint!;
@@ -199,5 +207,5 @@ public partial class MainWindow : Window
         try { await StopServer(); closing = true; Close(); }
         catch (Exception ex) { Log("Не удалось остановить сервер: " + ex.Message + ". Лаунчер остаётся открыт."); }
     }
-    private record Invitation(int Schema, string Tag, string Address, string Password, string Fingerprint);
+    private record Invitation(int Schema, string Tag, string Address, string Password, string Fingerprint, string? GuardRevision = null);
 }

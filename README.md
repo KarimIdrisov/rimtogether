@@ -8,17 +8,17 @@ Windows launcher and two-player RimWorld Multiplayer server for Radmin VPN.
 
 ## What is synchronized
 
-The repository contains source, upstream server patches, release workflow and documentation. Releases contain self-contained Windows x64 executables and a SHA256-verified official Multiplayer archive. The updater downloads the entire cohort, validates it, then atomically switches the current pointer. Existing versions remain available for fallback.
+The repository contains source, client/server patches, release workflow and documentation. Releases contain self-contained Windows x64 executables, a verified official Multiplayer base archive and a hash-verified Guard overlay compiled from pinned source. The updater downloads the entire cohort, validates it, then atomically switches the current pointer. Existing versions remain available for fallback.
 
 Game files, DLC, arbitrary third-party mods, passwords, logs, local settings and player saves are excluded. Runtime state stays in `%LOCALAPPDATA%\RimTogether`. Updates are deferred while the game, launcher or server is running. The server remains hosted on the owner's PC, with password authentication and two-player limit.
 
 ## Development and releases
 
-Requires Git, .NET 9 SDK, Python 3 and Windows x64. Run `./BUILD.ps1 -Version 1.1.0` in PowerShell 7. The script checks out upstream [rwmt/Multiplayer v0.11.5](https://github.com/rwmt/Multiplayer/tree/v0.11.5), verifies its commit, applies `server-fixes.patch`, runs synthetic regression/network tests, publishes all executables and tests server restart/backup recovery. No real game installation or personal save is required by CI.
+Requires Git, .NET 9 SDK, Python 3 and Windows x64. Run `./BUILD.ps1 -Version 1.1.0` in PowerShell 7. The script checks out upstream [rwmt/Multiplayer v0.11.5](https://github.com/rwmt/Multiplayer/tree/v0.11.5), verifies its commit, applies `server-fixes.patch` and `client-fixes.patch`, compiles the guarded client, runs synthetic regression/network tests, publishes all executables and tests server restart/backup recovery. No real game installation or personal save is required by CI.
 
 Every push to `main` runs GitHub Actions. Only after all checks pass does the publish job create release `v1.1.<run_number>`, including `RimTogether-win-x64.zip`, `RimTogether-manifest.json` and `RimTogether.Start.exe`. Failed builds never advance the update channel. Pull requests build and test without publishing.
 
-The current cohort targets RimWorld 1.6.4633, Multiplayer 0.11.5 / protocol 54 and checkpoint schema 1. A future upstream upgrade must update and verify the client/server pair and checkpoint compatibility together. Do not change the mod tag alone.
+The current cohort targets RimWorld 1.6.4633 and Multiplayer 0.11.5 with `rt-guard1`, custom protocol **5401**, checkpoint schema 1. Both players must restart through the launcher and use a fresh invitation after upgrading. [Guard behavior, evidence and limits](DESYNC-GUARD.md). A future upstream upgrade must verify the client/server pair and checkpoint compatibility together.
 
 ## Limits
 

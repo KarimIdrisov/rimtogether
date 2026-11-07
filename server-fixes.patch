@@ -1,3 +1,74 @@
+diff --git a/Source/Common/MultiplayerServer.cs b/Source/Common/MultiplayerServer.cs
+index 88ddbc0..12697e7 100644
+--- a/Source/Common/MultiplayerServer.cs
++++ b/Source/Common/MultiplayerServer.cs
+@@ -94,6 +94,8 @@ namespace Multiplayer.Common
+ 
+         public void Run()
+         {
++            var previousContext = SynchronizationContext.Current;
++            SynchronizationContext.SetSynchronizationContext(new ServerLoopContext(this));
+             ServerLog.Detail("Server started");
+ 
+             Stopwatch time = Stopwatch.StartNew();
+@@ -115,6 +117,7 @@ namespace Multiplayer.Common
+                     queue.RunQueue(ServerLog.Error);
+                     netManagers.ForEach(manager => manager.Tick());
+                     TickNet();
++                    worldData.TickJoinPointTimeout(NetTimer);
+ 
+                     int ticked = 0;
+                     while (realTime > 0 && ticked < 2)
+@@ -170,6 +173,7 @@ namespace Multiplayer.Common
+             {
+                 ServerLog.Log($"Exception stopping the server: {e}");
+             }
++            SynchronizationContext.SetSynchronizationContext(previousContext);
+         }
+ 
+         private void TickNet()
+@@ -215,6 +219,14 @@ namespace Multiplayer.Common
+             queue.Enqueue(action);
+         }
+ 
++        public void UpdateHostWorkTicks(int value)
++        {
++            // This counter belongs to the client's process, not the persisted world.
++            // A reconnect/restart must not suppress joinpoints until the old counter is reached again.
++            if (value < workTicks) worldData.lastJoinPointAtWorkTicks = value;
++            workTicks = value;
++        }
++
+         public void SendToPlaying<T>(T packet, bool reliable = true, ServerPlayer? excluding = null) where T : IPacket
+         {
+             var serialized = packet.Serialize();
+diff --git a/Source/Common/Networking/AsyncConnectionState.cs b/Source/Common/Networking/AsyncConnectionState.cs
+index a1ca6a7..970c387 100644
+--- a/Source/Common/Networking/AsyncConnectionState.cs
++++ b/Source/Common/Networking/AsyncConnectionState.cs
+@@ -64,7 +64,7 @@ public abstract class AsyncConnectionState(ConnectionBase connection) : MpConnec
+     /// An exception is thrown if this is called again before the packet arrives. The player is disconnected if a
+     /// different packet type arrives.
+     /// </summary>
+-    protected Task<T> TypedPacket<T>() where T: struct, IPacket
++    protected async Task<T> TypedPacket<T>() where T: struct, IPacket
+     {
+         if (packetAwaitable != null)
+             throw new Exception($"Already waiting for another packet: {packetAwaitable}");
+@@ -72,8 +72,11 @@ public abstract class AsyncConnectionState(ConnectionBase connection) : MpConnec
+         ServerLog.Verbose($"{connection} waiting for {PacketTypeInfo<T>.Id}");
+ 
+         packetAwaitable = TypedPacketAwaitable<T>(out var task, announcePacketFailure: false);
+-        return task
+-            .ContinueWith(finishedTask => (T)finishedTask.Result!, TaskContinuationOptions.OnlyOnRanToCompletion);
++        // PacketAwaitable completes on the network loop. Do not dispatch protocol
++        // transitions to the thread pool where they race the server's collections.
++        var result = await task;
++        await EndIfDead();
++        return result!.Value;
+     }
+ 
+     /// <summary>
 diff --git a/Source/Common/Networking/NetworkingLiteNet.cs b/Source/Common/Networking/NetworkingLiteNet.cs
 index 374d848..5e0b22a 100644
 --- a/Source/Common/Networking/NetworkingLiteNet.cs
@@ -11,8 +82,141 @@ index 374d848..5e0b22a 100644
                  return;
              }
  
+diff --git a/Source/Common/Networking/Packet/JoinDataPacket.cs b/Source/Common/Networking/Packet/JoinDataPacket.cs
+index 641d493..97edd20 100644
+--- a/Source/Common/Networking/Packet/JoinDataPacket.cs
++++ b/Source/Common/Networking/Packet/JoinDataPacket.cs
+@@ -5,6 +5,7 @@ public record struct ServerJoinDataPacket : IPacket
+ {
+     public string gameName;
+     public int playerId;
++    public bool isHost;
+     public string rwVersion;
+     public string mpVersion;
+     public DefCheckStatus[] defStatus;
+@@ -14,6 +15,7 @@ public record struct ServerJoinDataPacket : IPacket
+     {
+         buf.Bind(ref gameName);
+         buf.Bind(ref playerId);
++        buf.Bind(ref isHost);
+         buf.Bind(ref rwVersion);
+         buf.Bind(ref mpVersion);
+         buf.Bind(ref defStatus, BinderOf.Enum<DefCheckStatus>());
+diff --git a/Source/Common/Networking/State/ServerJoiningState.cs b/Source/Common/Networking/State/ServerJoiningState.cs
+index ebf0895..a9f432e 100644
+--- a/Source/Common/Networking/State/ServerJoiningState.cs
++++ b/Source/Common/Networking/State/ServerJoiningState.cs
+@@ -15,6 +15,7 @@ public class ServerJoiningState : AsyncConnectionState
+     {
+         HandleProtocol(await TypedPacket<ClientProtocolPacket>());
+         HandleUsername(await TypedPacket<ClientUsernamePacket>());
++        await EndIfDead();
+ 
+         while (await Server.InitDataTask() is null && await EndIfDead())
+             if (Server.InitDataState == InitDataState.Waiting)
+@@ -93,6 +94,11 @@ public class ServerJoiningState : AsyncConnectionState
+ 
+     private async Task RequestInitData()
+     {
++        if (Server.IsStandaloneServer && !Player.IsHost)
++        {
++            Player.Disconnect(MpDisconnectReason.ServerStarting);
++            return;
++        }
+         ClientInitDataPacket? initData = null;
+         var completionSource = Server.StartInitData();
+         try
+@@ -148,6 +154,7 @@ public class ServerJoiningState : AsyncConnectionState
+         {
+             gameName = Server.settings.gameName,
+             playerId = Player.id,
++            isHost = Player.IsHost,
+             rwVersion = serverInitData.RwVersion,
+             mpVersion = MpVersion.Version,
+             defStatus = defStatus,
+diff --git a/Source/Common/Networking/State/ServerLoadingState.cs b/Source/Common/Networking/State/ServerLoadingState.cs
+index 7663880..61661a8 100644
+--- a/Source/Common/Networking/State/ServerLoadingState.cs
++++ b/Source/Common/Networking/State/ServerLoadingState.cs
+@@ -19,7 +19,7 @@ public class ServerLoadingState : AsyncConnectionState
+         Player.keepAliveAt = Server.NetTimer;
+ 
+         if (Player.IsHost)
+-            Server.workTicks = packet.workTicks;
++            Server.UpdateHostWorkTicks(packet.workTicks);
+ 
+         var idMatched = Player.keepAliveId == packet.id;
+         connection.OnKeepAliveArrived(idMatched);
+diff --git a/Source/Common/Networking/State/ServerPlayingState.cs b/Source/Common/Networking/State/ServerPlayingState.cs
+index c6d22e2..6580216 100644
+--- a/Source/Common/Networking/State/ServerPlayingState.cs
++++ b/Source/Common/Networking/State/ServerPlayingState.cs
+@@ -9,12 +9,15 @@ namespace Multiplayer.Common
+         [PacketHandler(Packets.Client_WorldReady)]
+         public void HandleWorldReady(ByteReader data)
+         {
++            Player.simulating = false;
+             Player.UpdateStatus(PlayerStatus.Playing);
+         }
+ 
+         [PacketHandler(Packets.Client_RequestRejoin)]
+         public void HandleRejoin(ByteReader data)
+         {
++            Player.simulating = true;
++            Player.UpdateStatus(PlayerStatus.Simulating);
+             connection.ChangeState(ConnectionStateEnum.ServerLoading);
+             Player.ResetTimeVotes();
+         }
+@@ -83,25 +86,30 @@ namespace Multiplayer.Common
+         [PacketHandler(Packets.Client_WorldDataUpload, allowFragmented: true)]
+         public void HandleWorldDataUpload(ByteReader data)
+         {
+-            if (Server.ArbiterPlaying ? !Player.IsArbiter : !Player.IsHost) // policy
+-                return;
++            if ((Server.ArbiterPlaying ? !Player.IsArbiter : !Player.IsHost) || Player.status != PlayerStatus.Playing)
++            { data.Seek(data.Length); return; }
++
++            var requestId = data.ReadInt32();
++            if (!Server.worldData.CanAcceptSnapshot(requestId))
++            { data.Seek(data.Length); return; }
+ 
+             ServerLog.Log($"Got world upload {data.Left}");
+ 
+-            Server.worldData.mapData = new Dictionary<int, byte[]>();
++            var mapData = new Dictionary<int, byte[]>();
+ 
+             int maps = data.ReadInt32();
++            if (maps < 0 || maps > 1000) throw new PacketReadException("Invalid map count in world upload");
+             for (int i = 0; i < maps; i++)
+             {
+                 int mapId = data.ReadInt32();
+-                Server.worldData.mapData[mapId] = data.ReadPrefixedBytes();
++                mapData.Add(mapId, data.ReadPrefixedBytes());
+             }
+ 
+-            Server.worldData.savedGame = data.ReadPrefixedBytes();
+-            Server.worldData.sessionData = data.ReadPrefixedBytes();
++            var world = data.ReadPrefixedBytes();
++            var sessions = data.ReadPrefixedBytes();
++            if (data.Left != 0) throw new PacketReadException("Trailing data in world upload");
+ 
+-            if (Server.worldData.CreatingJoinPoint)
+-                Server.worldData.EndJoinPointCreation();
++            Server.worldData.CommitSnapshot(requestId, mapData, world, sessions);
+         }
+ 
+         [TypedPacketHandler]
+@@ -131,7 +139,7 @@ namespace Multiplayer.Common
+             Player.keepAliveAt = Server.NetTimer;
+ 
+             if (Player.IsHost)
+-                Server.workTicks = packet.workTicks;
++                Server.UpdateHostWorkTicks(packet.workTicks);
+ 
+             var idMatched = Player.keepAliveId == packet.id;
+             connection.OnKeepAliveArrived(idMatched);
 diff --git a/Source/Common/PlayerManager.cs b/Source/Common/PlayerManager.cs
-index cc3da92..7335f8c 100644
+index cc3da92..b44b75b 100644
 --- a/Source/Common/PlayerManager.cs
 +++ b/Source/Common/PlayerManager.cs
 @@ -33,13 +33,14 @@ namespace Multiplayer.Common
@@ -33,3 +237,216 @@ index cc3da92..7335f8c 100644
              if (lastConnection.TryGetValue(id, out var last) && clock.ElapsedMilliseconds - last < ThrottleMillis)
                  return MpDisconnectReason.Throttled;
  
+@@ -71,7 +72,7 @@ namespace Multiplayer.Common
+             ServerPlayer player = conn.serverPlayer;
+             Players.Remove(player);
+ 
+-            if (player.IsHost && server.worldData.CreatingJoinPoint)
++            if (server.worldData.CreatingJoinPoint && (player.IsHost || !Players.Any(p => p.hasJoined)))
+             {
+                 server.worldData.AbortJoinPointCreation();
+                 ServerLog.Log("Aborted join point creation because the host disconnected.");
+@@ -109,14 +110,20 @@ namespace Multiplayer.Common
+         public void OnDesync(ServerPlayer player, int tick, int diffAt)
+         {
+             player.UpdateStatus(PlayerStatus.Desynced);
+-            server.HostPlayer.SendPacket(ServerTracesPacket.Request(tick, diffAt, player.id));
++            var authority = server.PlayingIngamePlayers.FirstOrDefault(p => p.IsHost && p.status == PlayerStatus.Playing && !p.simulating);
++            authority?.SendPacket(ServerTracesPacket.Request(tick, diffAt, player.id));
+ 
+             player.ResetTimeVotes();
+ 
+             if (server.settings.pauseOnDesync)
+                 server.commands.PauseAll();
+ 
+-            if (server.settings.autoJoinPoint.HasFlag(AutoJoinPointFlags.Desync))
++            if (authority == null)
++            {
++                server.worldData.AbortJoinPointCreation();
++                server.SendChat("Recovery: healthy host unavailable; cached snapshot retained. Wait for the host before resuming.");
++            }
++            else if (server.settings.autoJoinPoint.HasFlag(AutoJoinPointFlags.Desync))
+                 server.worldData.TryStartJoinPointCreation(true);
+         }
+ 
+diff --git a/Source/Common/RecoveryPolicy.cs b/Source/Common/RecoveryPolicy.cs
+new file mode 100644
+index 0000000..f350c64
+--- /dev/null
++++ b/Source/Common/RecoveryPolicy.cs
+@@ -0,0 +1,21 @@
++namespace Multiplayer.Common;
++
++// Pure policy shared by the client and regression tests. No simulation state is repaired here.
++public static class RecoveryPolicy
++{
++    public static bool ShouldUpload(bool simulating, bool replay, bool localServer, bool arbiter, bool dedicatedHost) =>
++        !simulating && !replay && (localServer || arbiter || dedicatedHost);
++}
++
++public sealed class AutoRecoveryBudget
++{
++    private double? previous;
++    public bool CircuitOpen { get; private set; }
++    public bool TryAcquire(double seconds)
++    {
++        if (CircuitOpen) return false;
++        if (previous is { } last && seconds - last < 180)
++        { CircuitOpen = true; return false; }
++        previous = seconds; return true;
++    }
++}
+diff --git a/Source/Common/ServerLoopContext.cs b/Source/Common/ServerLoopContext.cs
+new file mode 100644
+index 0000000..ad5521e
+--- /dev/null
++++ b/Source/Common/ServerLoopContext.cs
+@@ -0,0 +1,9 @@
++using System.Threading;
++
++namespace Multiplayer.Common;
++
++public sealed class ServerLoopContext(MultiplayerServer server) : SynchronizationContext
++{
++    public override void Post(SendOrPostCallback callback, object? state) => server.Enqueue(() => callback(state));
++    public override SynchronizationContext CreateCopy() => this;
++}
+diff --git a/Source/Common/SnapshotCompression.cs b/Source/Common/SnapshotCompression.cs
+new file mode 100644
+index 0000000..7819f0f
+--- /dev/null
++++ b/Source/Common/SnapshotCompression.cs
+@@ -0,0 +1,26 @@
++using System.IO;
++using System.IO.Compression;
++
++namespace Multiplayer.Common;
++
++public static class SnapshotCompression
++{
++    // Validate the gzip stream before replacing the authority cache. Discard output in bounded buffers.
++    public static void Validate(byte[] data, bool allowEmpty = false)
++    {
++        if (data == null) throw new InvalidDataException("Missing compressed snapshot");
++        if (allowEmpty && data.Length == 0) return;
++        if (data.Length < 18 || data[0] != 0x1f || data[1] != 0x8b) throw new InvalidDataException("Truncated compressed snapshot");
++        using var input = new MemoryStream(data, false);
++        using var gzip = new GZipStream(input, CompressionMode.Decompress);
++        var buffer = new byte[81920]; long total = 0; int read;
++        while ((read = gzip.Read(buffer, 0, buffer.Length)) != 0)
++        {
++            total += read;
++            if (total > 512L * 1024 * 1024) throw new InvalidDataException("Expanded snapshot exceeds safety limit");
++        }
++        var footer = data.Length - 4;
++        uint expected = (uint)(data[footer] | data[footer + 1] << 8 | data[footer + 2] << 16 | data[footer + 3] << 24);
++        if ((uint)total != expected || !allowEmpty && total == 0) throw new InvalidDataException("Incomplete compressed snapshot footer");
++    }
++}
+diff --git a/Source/Common/Version.cs b/Source/Common/Version.cs
+index be9f185..c98d381 100644
+--- a/Source/Common/Version.cs
++++ b/Source/Common/Version.cs
+@@ -6,13 +6,13 @@ namespace Multiplayer.Common
+     public static class MpVersion
+     {
+         public const string SimpleVersion = "0.11.5";
+-        public const int Protocol = 54;
++        public const int Protocol = 5401; // RimTogether Guard: numbered world uploads.
+ 
+         public static readonly string? GitHash = Assembly.GetExecutingAssembly()
+             .GetCustomAttributes<AssemblyMetadataAttribute>()
+             .FirstOrDefault(attr => attr.Key == "GitHash")?.Value;
+ 
+-        public static readonly string Version = SimpleVersion + (GitHash != null ? $"+{GitHash}" : "");
++        public static readonly string Version = SimpleVersion + "-rt-guard1" + (GitHash != null ? $"+{GitHash}" : "");
+ 
+         public static readonly string? GitDescription = Assembly.GetExecutingAssembly()
+             .GetCustomAttributes<AssemblyMetadataAttribute>()
+diff --git a/Source/Common/WorldData.cs b/Source/Common/WorldData.cs
+index a76e18d..34a67d1 100644
+--- a/Source/Common/WorldData.cs
++++ b/Source/Common/WorldData.cs
+@@ -1,5 +1,6 @@
+ ﻿using System;
+ using System.Collections.Generic;
++using System.Linq;
+ using System.Threading.Tasks;
+ 
+ namespace Multiplayer.Common;
+@@ -21,6 +22,12 @@ public class WorldData
+     private TaskCompletionSource<WorldData>? dataSource;
+ 
+     public bool CreatingJoinPoint => tmpMapCmds != null;
++    public int PendingJoinPointId { get; private set; }
++    private int nextJoinPointId;
++    private int joinPointStartedAt;
++    public int LastSnapshotAtNetTick { get; private set; }
++    public int SnapshotGeneration { get; private set; }
++    public const int JoinPointTimeoutTicks = MultiplayerServer.NetTicksPerSecond * 30;
+ 
+     public MultiplayerServer Server { get; }
+ 
+@@ -37,9 +44,15 @@ public class WorldData
+         if (CreatingJoinPoint)
+             return false;
+ 
++        if (Server.IsStandaloneServer && !Server.PlayingIngamePlayers.Any(p =>
++                (Server.ArbiterPlaying ? p.IsArbiter : p.IsHost) && !p.simulating && !p.frozen))
++            return false;
++
+         Server.SendChat("Creating a join point...");
+ 
+-        Server.commands.Send(CommandType.CreateJoinPoint, ScheduledCommand.NoFaction, ScheduledCommand.Global, Array.Empty<byte>());
++        PendingJoinPointId = ++nextJoinPointId;
++        joinPointStartedAt = Server.NetTimer;
++        Server.commands.Send(CommandType.CreateJoinPoint, ScheduledCommand.NoFaction, ScheduledCommand.Global, ByteWriter.GetBytes(PendingJoinPointId));
+         tmpMapCmds = new Dictionary<int, List<byte[]>>();
+         dataSource = new TaskCompletionSource<WorldData>();
+ 
+@@ -50,6 +63,9 @@ public class WorldData
+     {
+         mapCmds = tmpMapCmds!;
+         tmpMapCmds = null;
++        PendingJoinPointId = 0;
++        LastSnapshotAtNetTick = Server.NetTimer;
++        SnapshotGeneration++;
+         lastJoinPointAtWorkTicks = Server.workTicks;
+         dataSource!.SetResult(this);
+         dataSource = null;
+@@ -61,6 +77,7 @@ public class WorldData
+             return;
+ 
+         tmpMapCmds = null;
++        PendingJoinPointId = 0;
+         dataSource?.SetResult(this);
+         dataSource = null;
+     }
+@@ -69,4 +86,27 @@ public class WorldData
+     {
+         return dataSource?.Task ?? Task.FromResult(this);
+     }
++
++    public void TickJoinPointTimeout(int netTimer)
++    {
++        if (!CreatingJoinPoint || netTimer - joinPointStartedAt < JoinPointTimeoutTicks) return;
++        ServerLog.Error("Joinpoint timed out; retaining previous snapshot and complete command history.");
++        AbortJoinPointCreation();
++    }
++
++    public bool CanAcceptSnapshot(int requestId) =>
++        CreatingJoinPoint ? requestId == PendingJoinPointId : savedGame == null && requestId == 0;
++
++    public bool CommitSnapshot(int requestId, Dictionary<int, byte[]> maps, byte[] world, byte[] sessions)
++    {
++        if (!CanAcceptSnapshot(requestId)) return false;
++        if (world == null || world.Length == 0 || sessions == null || maps == null || maps.Values.Any(v => v == null || v.Length == 0))
++            throw new ArgumentException("Incomplete world upload");
++        SnapshotCompression.Validate(world);
++        SnapshotCompression.Validate(sessions, allowEmpty: true);
++        foreach (var map in maps.Values) SnapshotCompression.Validate(map);
++        mapData = maps; savedGame = world; sessionData = sessions;
++        if (CreatingJoinPoint) EndJoinPointCreation();
++        return true;
++    }
+ }

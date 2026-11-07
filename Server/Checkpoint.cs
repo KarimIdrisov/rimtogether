@@ -59,8 +59,10 @@ public sealed class Checkpoint
 
     public void Validate()
     {
-        if (Schema != 1 || Tag != Contract.Tag || World.Length == 0 || Maps.Count == 0 || Tick < StartingTick)
+        if (Schema != 1 || Tag != Contract.Tag || World == null || World.Length == 0 || Maps == null || Commands == null || Session == null || Tick < StartingTick)
             throw new InvalidDataException("Контрольная точка несовместима или повреждена.");
+        SnapshotCompression.Validate(World); SnapshotCompression.Validate(Session, allowEmpty: true);
+        foreach (var map in Maps.Values) SnapshotCompression.Validate(map);
         foreach (var bytes in Commands.Values.SelectMany(v => v)) _ = ScheduledCommand.Deserialize(new ByteReader(bytes));
     }
     public void Apply(MultiplayerServer server)
