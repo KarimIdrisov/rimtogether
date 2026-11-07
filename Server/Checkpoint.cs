@@ -6,7 +6,9 @@ namespace RimTogether;
 public sealed class Checkpoint
 {
     public int Schema { get; set; } = 1;
-    public string Tag { get; set; } = Contract.Tag;
+    public const string GuardTag = Contract.Tag + "+" + Contract.GuardRevision;
+    public string Tag { get; set; } = GuardTag;
+    public int ClientProtocol { get; set; }
     public int Tick { get; set; }
     public int StartingTick { get; set; }
     public int WorkTicks { get; set; }
@@ -35,6 +37,7 @@ public sealed class Checkpoint
         var prefix = (info.sections.Count - 1).ToString("D3");
         var result = new Checkpoint { Tick = section.end, StartingTick = section.start, HostFaction = info.playerFaction,
             SpectatorFaction = info.spectatorFaction, AsyncTime = info.asyncTime, Multifaction = info.multifaction,
+            ClientProtocol = info.protocol, Tag = info.protocol == Contract.Protocol ? GuardTag : Contract.Tag,
             World = Compress(Read("world/" + prefix + "_save")) };
         foreach (var entry in zip.Entries.Where(e => e.FullName.StartsWith("maps/" + prefix + "_")))
         {
@@ -54,13 +57,19 @@ public sealed class Checkpoint
         HostFaction = server.worldData.hostFactionId, SpectatorFaction = server.worldData.spectatorFactionId,
         World = server.worldData.savedGame!, Session = server.worldData.sessionData ?? [],
         Maps = server.worldData.mapData, Commands = server.worldData.mapCmds,
-        AsyncTime = server.settings.asyncTime, Multifaction = server.settings.multifaction
+        AsyncTime = server.settings.asyncTime, Multifaction = server.settings.multifaction,
+        ClientProtocol = Contract.Protocol
     };
 
     public void Validate()
     {
-        if (Schema != 1 || Tag != Contract.Tag || World == null || World.Length == 0 || Maps == null || Commands == null || Session == null || Tick < StartingTick)
+        if (Schema != 1 || World == null || World.Length == 0 || Maps == null || Commands == null || Session == null || Tick < StartingTick)
             throw new InvalidDataException("Контрольная точка несовместима или повреждена.");
+        var legacy = ClientProtocol is 0 or 53 or 54;
+        if (legacy && (Tick != StartingTick || Commands.Values.Any(commands => commands.Count != 0)))
+            throw new InvalidDataException("Старое сохранение содержит историю команд. Загрузите его старым Multiplayer и сделайте обычное полное MP-сохранение, затем выберите новый ZIP. История не переигрывается под изменёнными RNG-правилами.");
+        if (!(legacy && Tag == Contract.Tag) && !(ClientProtocol == Contract.Protocol && Tag == GuardTag))
+            throw new InvalidDataException("Версия checkpoint не соответствует Guard. Нужна совместимая версия программы.");
         SnapshotCompression.Validate(World); SnapshotCompression.Validate(Session, allowEmpty: true);
         foreach (var map in Maps.Values) SnapshotCompression.Validate(map);
         foreach (var bytes in Commands.Values.SelectMany(v => v)) _ = ScheduledCommand.Deserialize(new ByteReader(bytes));

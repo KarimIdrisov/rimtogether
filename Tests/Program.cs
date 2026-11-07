@@ -77,6 +77,11 @@ try
     Check(mechanics == GameFingerprint.Compute(game, config), "translation text does not change mechanics fingerprint");
     BundleChecks.Run(Path.Combine(fixture, "bundles"), Check, Throws);
     var checkpoint = Checkpoint.FromReplay(replayPath); checkpoint.Validate();
+    var legacyFresh = Checkpoint.FromReplay(SyntheticReplay.Create(Path.Combine(fixture, "legacy-full.zip"), 53));
+    Check(legacyFresh.Tick == legacyFresh.StartingTick, "full legacy save safely imports without historical resimulation");
+    Throws(() => Checkpoint.FromReplay(SyntheticReplay.Create(Path.Combine(fixture, "legacy-history.zip"), 54, true)), "legacy historical replay is blocked before changed RNG rules can alter its past");
+    var unsafeRollback = Checkpoint.Capture(new MultiplayerServer(new ServerSettings()));
+    Check(unsafeRollback.Tag != Contract.Tag, "guard checkpoint tag prevents old launcher from silently replaying guard commands");
     RecoveryChecks.Run(checkpoint, Check, Throws);
     NetworkChecks.Run(checkpoint, Check);
     var server = new MultiplayerServer(new ServerSettings()); checkpoint.Apply(server);

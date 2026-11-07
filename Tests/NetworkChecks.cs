@@ -9,6 +9,8 @@ public static class NetworkChecks
 {
     public static void Run(Checkpoint checkpoint, Action<bool, string> check)
     {
+        checkpoint = System.Text.Json.JsonSerializer.Deserialize<Checkpoint>(System.Text.Json.JsonSerializer.Serialize(checkpoint, Storage.Json), Storage.Json)!;
+        checkpoint.Validate(); checkpoint.ClientProtocol = Contract.Protocol; checkpoint.Tag = Checkpoint.GuardTag;
         var server = MultiplayerServer.instance = new MultiplayerServer(new ServerSettings
         { maxPlayers = 2, hasPassword = true, password = "test-password", autoJoinPoint = AutoJoinPointFlags.Join | AutoJoinPointFlags.Desync })
         { running = true, IsStandaloneServer = true, hostUsername = "Alpha" };

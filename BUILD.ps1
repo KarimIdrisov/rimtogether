@@ -63,7 +63,7 @@ foreach ($project in @('Launcher', 'Server', 'Bootstrap')) {
 }
 $previousIntegration = $env:RIMTOGETHER_INTEGRATION_DIR
 try {
-    $env:RIMTOGETHER_INTEGRATION_DIR = Join-Path $cache 'process-test'
+    $env:RIMTOGETHER_INTEGRATION_DIR = Join-Path $cache 'process-test-guard1'
     python (Join-Path $sourceRoot 'integration.py') (Join-Path $cache 'synthetic-replay.zip') (Join-Path $destinationFull 'server/RimTogether.Server.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Standalone process integration tests failed' }
 } finally { $env:RIMTOGETHER_INTEGRATION_DIR = $previousIntegration }

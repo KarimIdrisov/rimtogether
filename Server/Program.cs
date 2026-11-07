@@ -21,9 +21,15 @@ try
             try { checkpoint = Storage.Read<Checkpoint>(candidate); checkpoint.Validate(); break; }
             catch (Exception e) { Console.WriteLine("CHECKPOINT WARNING: " + e.Message); checkpoint = null; }
         }
-        if (checkpoint == null) throw new InvalidDataException("Обе контрольные точки повреждены. Автоматический откат к началу колонии запрещён; восстановите резервную копию.");
+        if (checkpoint == null) throw new InvalidDataException("Контрольные точки не удалось безопасно загрузить. Причина указана выше; несовместимые или повреждённые данные не перезаписываются.");
     }
     else checkpoint = Checkpoint.FromReplay(config.SeedReplay);
+    if (checkpoint.ClientProtocol != Contract.Protocol)
+    {
+        Storage.Write(Path.Combine(directory, "checkpoint.pre-guard.json"), checkpoint, keepRawBackup: false);
+        checkpoint.ClientProtocol = Contract.Protocol; checkpoint.Tag = Checkpoint.GuardTag;
+        Console.WriteLine("MIGRATION: fresh legacy snapshot imported; pre-guard copy retained. Historical replay was not re-executed.");
+    }
     if (!IPAddress.TryParse(config.HostAddress, out var bind) || bind.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
         throw new InvalidDataException("Нужен IPv4 адаптера Radmin.");
     if (config.Password.Length < 6) throw new InvalidDataException("Пароль должен быть от 6 символов.");

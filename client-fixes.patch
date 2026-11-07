@@ -144,6 +144,23 @@ index 49519f9..da35604 100644
              Log.Message($"Arch: {RuntimeInformation.ProcessArchitecture}/OS: {RuntimeInformation.OSArchitecture}");
              Log.Message($"Player's username: {Multiplayer.username}");
  
+diff --git a/Source/Client/Networking/ClientUtil.cs b/Source/Client/Networking/ClientUtil.cs
+index 50f6493..6061341 100644
+--- a/Source/Client/Networking/ClientUtil.cs
++++ b/Source/Client/Networking/ClientUtil.cs
+@@ -13,6 +13,12 @@ namespace Multiplayer.Client
+     {
+         public static void TryConnectWithWindow(IConnector connector, bool returnToServerBrowser = true)
+         {
++            if (Multiplayer.loadingErrors)
++            {
++                Log.Error("RimTogether Guard: multiplayer connection blocked because patches failed to initialize.");
++                Find.WindowStack.Add(new Dialog_MessageBox("Не удалось применить защитные патчи. Подключение отменено. Перезапусти лаунчер; подробности в Player.log."));
++                return;
++            }
+             var (conn, window) = connector.Connect(Multiplayer.username);
+ 
+             Multiplayer.session = new MultiplayerSession
 diff --git a/Source/Client/Networking/State/ClientJoiningState.cs b/Source/Client/Networking/State/ClientJoiningState.cs
 index d3297ae..8c551f0 100644
 --- a/Source/Client/Networking/State/ClientJoiningState.cs
@@ -156,6 +173,44 @@ index d3297ae..8c551f0 100644
  
              var remoteInfo = new RemoteData
              {
+diff --git a/Source/Client/Patches/Feedback.cs b/Source/Client/Patches/Feedback.cs
+index e2e18e1..bf6183b 100644
+--- a/Source/Client/Patches/Feedback.cs
++++ b/Source/Client/Patches/Feedback.cs
+@@ -237,11 +237,15 @@ namespace Multiplayer.Client.Patches
+         private static MethodInfo tryTakeOrderedJob =
+             AccessTools.Method(typeof(Pawn_JobTracker), nameof(Pawn_JobTracker.TryTakeOrderedJob));
+ 
++        private static MethodInfo endCurrentJob =
++            AccessTools.Method(typeof(Pawn_JobTracker), nameof(Pawn_JobTracker.EndCurrentJob));
++
+         static IEnumerable<CodeInstruction> Transpiler(IEnumerable<CodeInstruction> instructions)
+         {
+             foreach (var inst in instructions)
+             {
+                 if (inst.Calls(tryTakeOrderedJob)) inst.operand = ((Delegate)CustomTryTakeOrderedJob).Method;
++                else if (inst.Calls(endCurrentJob)) inst.operand = ((Delegate)CustomEndCurrentJob).Method;
+                 yield return inst;
+             }
+         }
+@@ -254,6 +258,17 @@ namespace Multiplayer.Client.Patches
+                 FleckMaker.Static(job.targetA.Cell, self.pawn.Map, FleckDefOf.FeedbackGoto);
+             return false;
+         }
++
++        // PawnGotoAction can also stop a pawn without going through TryTakeOrderedJob: when the pawn is
++        // already standing on gotoLoc and its current job is Goto, it calls EndCurrentJob directly. That
++        // call isn't synced, so the pawn stops only for the player who issued the order while it keeps
++        // walking for everyone else, causing a desync. Sync it the same way as the TryTakeOrderedJob call.
++        [SyncMethod]
++        static void CustomEndCurrentJob(Pawn_JobTracker self, JobCondition condition,
++            bool startNewJob = true, bool canReturnToPool = true)
++        {
++            self.EndCurrentJob(condition, startNewJob, canReturnToPool);
++        }
+     }
+ 
+ }
 diff --git a/Source/Client/Patches/Seeds.cs b/Source/Client/Patches/Seeds.cs
 index 373af28..98de49d 100644
 --- a/Source/Client/Patches/Seeds.cs
@@ -343,6 +398,30 @@ index 0000000..45e62de
 +        return false;
 +    }
 +}
+diff --git a/Source/Client/Syncing/Sync.cs b/Source/Client/Syncing/Sync.cs
+index 3ec9558..696ebaf 100644
+--- a/Source/Client/Syncing/Sync.cs
++++ b/Source/Client/Syncing/Sync.cs
+@@ -26,6 +26,9 @@ namespace Multiplayer.Client
+ 
+             for (int i = 0; i < handlers.Count; i++)
+                 handlers[i].syncId = i;
++            if (Environment.GetEnvironmentVariable("RIMTOGETHER_SYNC_AUDIT") == "1")
++                foreach (var handler in handlers) Log.Message($"RTSYNC {handler.syncId}|{handler}");
++            Log.Message(Multiplayer.loadingErrors ? "RTGUARD_FAILED initialization" : $"RTGUARD_READY handlers={handlers.Count}");
+         }
+ 
+         public static SyncMethod Method(Type targetType, string methodName, SyncType[] argTypes = null)
+@@ -179,6 +182,9 @@ namespace Multiplayer.Client
+             }
+ 
+             var sm = RegisterSyncMethod(method);
++            // Append the new guard operation without renumbering the existing command table.
++            if (method.DeclaringType == typeof(Patches.DraftedMove_GotoFeedbackPatch) && method.Name == "CustomEndCurrentJob")
++                sm.SetVersion(int.MaxValue);
+             sm.context = attribute.context;
+             sm.debugOnly = attribute.debugOnly;
+ 
 diff --git a/Source/Client/Windows/DesyncedWindow.cs b/Source/Client/Windows/DesyncedWindow.cs
 index addc12e..2dfa7be 100644
 --- a/Source/Client/Windows/DesyncedWindow.cs
