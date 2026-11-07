@@ -1,0 +1,35 @@
+diff --git a/Source/Common/Networking/NetworkingLiteNet.cs b/Source/Common/Networking/NetworkingLiteNet.cs
+index 374d848..5e0b22a 100644
+--- a/Source/Common/Networking/NetworkingLiteNet.cs
++++ b/Source/Common/Networking/NetworkingLiteNet.cs
+@@ -11,7 +11,7 @@ namespace Multiplayer.Common
+         {
+             if (server.playerManager.OnPreConnect(req.RemoteEndPoint.Address) is { } disconnectReason)
+             {
+-                req.Reject(new ServerDisconnectPacket { reason = disconnectReason }.Serialize().data);
++                req.Reject(new ServerDisconnectPacket { reason = disconnectReason, data = [] }.Serialize().data);
+                 return;
+             }
+ 
+diff --git a/Source/Common/PlayerManager.cs b/Source/Common/PlayerManager.cs
+index cc3da92..7335f8c 100644
+--- a/Source/Common/PlayerManager.cs
++++ b/Source/Common/PlayerManager.cs
+@@ -33,13 +33,14 @@ namespace Multiplayer.Common
+             if (server.FullyStarted is false && !server.BootstrapMode)
+                 return MpDisconnectReason.ServerStarting;
+ 
+-            if (id is IPAddress addr && IPAddress.IsLoopback(addr))
+-                return null;
+-
+             if (server.settings.maxPlayers > 0 &&
+                 Players.Count(p => !p.IsArbiter) >= server.settings.maxPlayers)
+                 return MpDisconnectReason.ServerFull;
+ 
++            // RimTogether: local clients bypass throttling, but still consume player slots.
++            if (id is IPAddress addr && IPAddress.IsLoopback(addr))
++                return null;
++
+             if (lastConnection.TryGetValue(id, out var last) && clock.ElapsedMilliseconds - last < ThrottleMillis)
+                 return MpDisconnectReason.Throttled;
+ 
