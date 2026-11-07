@@ -6,7 +6,7 @@ namespace RimTogether;
 public static class Storage
 {
     public static readonly JsonSerializerOptions Json = new() { WriteIndented = true, IncludeFields = true };
-    public static void Write<T>(string path, T value)
+    public static void Write<T>(string path, T value, bool keepRawBackup = true)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(path))!);
         var temp = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
@@ -17,7 +17,7 @@ public static class Storage
                 JsonSerializer.Serialize(stream, value, Json);
                 stream.Flush(true);
             }
-            if (File.Exists(path)) File.Copy(path, path + ".bak", true);
+            if (keepRawBackup && File.Exists(path)) File.Copy(path, path + ".bak", true);
             File.Move(temp, path, true);
         }
         finally { if (File.Exists(temp)) File.Delete(temp); }

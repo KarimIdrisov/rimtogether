@@ -10,7 +10,7 @@ if (args.FirstOrDefault(a => a.StartsWith("--wait-pid=")) is { } wait && int.Try
     try { await Process.GetProcessById(parentId).WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(15)); }
     catch (ArgumentException) { }
 }
-var root = Path.Combine(Contract.DataRoot, "app");
+var root = Environment.GetEnvironmentVariable("RIMTOGETHER_UPDATER_ROOT") ?? Path.Combine(Contract.DataRoot, "app");
 Directory.CreateDirectory(root);
 FileStream exclusive;
 try { exclusive = new FileStream(Path.Combine(root, "update.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
@@ -53,15 +53,22 @@ using (exclusive)
                         Console.WriteLine("Скачиваем " + tag + ". Лаунчер + сервер + Multiplayer…");
                         using var archiveResponse = await http.GetAsync(baseUrl + BundleUpdate.ArchiveName, HttpCompletionOption.ResponseHeadersRead);
                         archiveResponse.EnsureSuccessStatusCode();
-                        await using (var input = await archiveResponse.Content.ReadAsStreamAsync())
+                        using var downloadDeadline = new CancellationTokenSource(TimeSpan.FromMinutes(10));
+                        await using (var input = await archiveResponse.Content.ReadAsStreamAsync(downloadDeadline.Token))
                         await using (var output = File.Create(download))
                         {
-                            var buffer = new byte[81920]; long total = 0; int size;
-                            while ((size = await input.ReadAsync(buffer)) > 0)
+                            var buffer = new byte[81920]; long total = 0; var progressAt = Stopwatch.StartNew();
+                            while (true)
                             {
+                                using var idle = CancellationTokenSource.CreateLinkedTokenSource(downloadDeadline.Token);
+                                idle.CancelAfter(TimeSpan.FromSeconds(30));
+                                var size = await input.ReadAsync(buffer.AsMemory(), idle.Token);
+                                if (size == 0) break;
                                 total += size;
                                 if (total > manifest.Size) throw new InvalidDataException("Архив превышает заявленный размер.");
                                 await output.WriteAsync(buffer.AsMemory(0, size));
+                                if (progressAt.Elapsed > TimeSpan.FromSeconds(5))
+                                { Console.WriteLine($"{total / 1048576} / {manifest.Size / 1048576} МБ ({100 * total / manifest.Size}%)"); progressAt.Restart(); }
                             }
                         }
                         current = updater.Install(download, manifest);
@@ -72,7 +79,7 @@ using (exclusive)
                 else Console.WriteLine("Уже установлена версия " + tag + ". Все файлы проверены.");
             }
         }
-        catch (Exception e) when (e is HttpRequestException or IOException or JsonException or TaskCanceledException or ArgumentException)
+        catch (Exception e) when (e is HttpRequestException or IOException or JsonException or OperationCanceledException or ArgumentException)
         { Console.WriteLine("Обновление недоступно: " + e.Message + "\nПробуем ранее проверенную версию."); }
     }
     else Console.WriteLine("Игра, лаунчер или сервер работают. Обновление отложено до их закрытия.");
@@ -83,6 +90,8 @@ using (exclusive)
         if (!Console.IsInputRedirected) { Console.WriteLine("Enter — закрыть"); Console.ReadLine(); }
         return 1;
     }
+    if (args.Contains("--check-only"))
+    { Console.WriteLine("Комплект проверен. Запуск приложения пропущен."); return current != null ? 0 : 1; }
     var start = new ProcessStartInfo(exe) { WorkingDirectory = Path.GetDirectoryName(exe)!, UseShellExecute = false };
     start.ArgumentList.Add("--managed");
     start.Environment["RIMTOGETHER_BOOTSTRAP"] = Path.Combine(AppContext.BaseDirectory, "RimTogether.Start.exe");

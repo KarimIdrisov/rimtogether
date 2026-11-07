@@ -79,6 +79,7 @@ public sealed class BundleUpdate(string appRoot)
         manifest.Validate(manifest.Tag);
         if (new FileInfo(archive).Length != manifest.Size || !ModManager.Hash(archive).Equals(manifest.Sha256, StringComparison.OrdinalIgnoreCase))
             throw new InvalidDataException("Размер или SHA256 обновления не совпал. Установка отменена.");
+        var previousHealthy = Current();
         var destination = DirectoryFor(manifest);
         Directory.CreateDirectory(appRoot);
         var stage = Path.Combine(appRoot, "stage-" + Guid.NewGuid().ToString("N"));
@@ -100,7 +101,8 @@ public sealed class BundleUpdate(string appRoot)
                 catch { Directory.Move(damaged, destination); throw; }
             }
             else Directory.Move(stage, destination);
-            Storage.Write(Pointer, installed);
+            Storage.Write(Pointer, installed, keepRawBackup: false);
+            if (previousHealthy != null) Storage.Write(Pointer + ".bak", previousHealthy, keepRawBackup: false);
             return installed;
         }
         finally { if (Directory.Exists(stage)) Directory.Delete(stage, true); }

@@ -33,6 +33,9 @@ public static class BundleChecks
         check(updater.Current()?.Manifest.Tag == next.Tag, "failed download preserves current version");
         File.WriteAllText(Path.Combine(updater.DirectoryFor(next), "RimTogether.exe"), "damaged");
         check(updater.Current()?.Manifest.Tag == first.Tag, "corrupt installed release falls back to last healthy pointer");
+        File.WriteAllText(updater.Pointer, "{broken");
+        var recovered = Package("v1.1.4"); updater.Install(Path.Combine(root, recovered.Tag + ".zip"), recovered);
+        check(Storage.Read<InstalledBundle>(updater.Pointer + ".bak").Manifest.Tag == first.Tag, "update preserves healthy fallback when primary pointer was corrupt");
         throws(() => BundleUpdate.SafeFile(root, "../escape.exe"), "update metadata cannot escape installation directory");
         first.Schema = 9; throws(() => first.Validate(first.Tag), "future update schema rejected explicitly");
     }
