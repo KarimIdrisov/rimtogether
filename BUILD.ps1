@@ -30,7 +30,7 @@ if (-not (Test-Path -LiteralPath $archive) -or (Get-FileHash -LiteralPath $archi
     Invoke-WebRequest 'https://github.com/rwmt/Multiplayer/releases/download/v0.11.5/Multiplayer-v0.11.5.zip' -OutFile $archive
 }
 if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $expectedHash) { throw 'Archive checksum mismatch' }
-dotnet test (Join-Path $upstream 'Source/Tests/Tests.csproj') -c Release --nologo -v quiet
+dotnet test (Join-Path $upstream 'Source/Tests/Tests.csproj') -c Release --nologo -v minimal --logger 'console;verbosity=normal' --logger 'trx;LogFileName=upstream.trx' --results-directory (Join-Path $cache 'test-results')
 if ($LASTEXITCODE -ne 0) { throw 'Upstream regression tests failed' }
 dotnet build (Join-Path $upstream 'Source/Client/Multiplayer.csproj') -c Release
 if ($LASTEXITCODE -ne 0) { throw 'Guard client build failed' }
