@@ -11,7 +11,7 @@ if (-not (Test-Path -LiteralPath $upstream)) {
 }
 $head = git -C $upstream rev-parse HEAD
 if ($head -ne '4a3be276bbf90cc597abfa5b299935ca8eeeb285') { throw 'Unexpected upstream commit' }
-foreach ($patchName in @('server-fixes.patch', 'client-fixes.patch')) {
+foreach ($patchName in @('server-fixes.patch', 'client-fixes.patch', 'protocol-tests.patch')) {
 $patch = Join-Path $sourceRoot $patchName
 git -C $upstream apply --check $patch 2>$null
 if ($LASTEXITCODE -eq 0) {

@@ -1,0 +1,21 @@
+diff --git a/Source/Tests/PacketTest.cs b/Source/Tests/PacketTest.cs
+index b1bd0e7..178cdc6 100644
+--- a/Source/Tests/PacketTest.cs
++++ b/Source/Tests/PacketTest.cs
+@@ -271,8 +271,7 @@ public class PacketTest
+                 text.AppendLine();
+             }
+ 
+-            await Verify(text).UseDirectory("packet-serializations").UseFileName(packetsOfType.Key.Name).DisableDiff()
+-                .AutoVerify(includeBuildServer: false);
++            await Verify(text).UseDirectory("packet-serializations").UseFileName(packetsOfType.Key.Name).DisableDiff();
+         }
+     }
+ 
+diff --git a/Source/Tests/packet-serializations/ServerJoinDataPacket.verified.txt b/Source/Tests/packet-serializations/ServerJoinDataPacket.verified.txt
+index e7915cf..258b831 100644
+--- a/Source/Tests/packet-serializations/ServerJoinDataPacket.verified.txt
++++ b/Source/Tests/packet-serializations/ServerJoinDataPacket.verified.txt
+@@ -1 +1 @@
+-﻿08-00-00-00-47-61-6D-65-4E-61-6D-65-01-00-00-00-08-00-00-00-31-2E-36-2E-34-35-36-36-0D-00-00-00-30-2E-31-31-2E-30-2B-31-32-33-34-35-36-05-00-00-00-00-00-02-03-01-01-02-03-04-05 (59 bytes)
++﻿08-00-00-00-47-61-6D-65-4E-61-6D-65-01-00-00-00-00-08-00-00-00-31-2E-36-2E-34-35-36-36-0D-00-00-00-30-2E-31-31-2E-30-2B-31-32-33-34-35-36-05-00-00-00-00-00-02-03-01-01-02-03-04-05 (60 bytes)
