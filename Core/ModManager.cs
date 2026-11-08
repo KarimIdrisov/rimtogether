@@ -133,6 +133,7 @@ public sealed class ModManager(HttpClient http, string dataRoot, Action<string> 
         var staging = Path.Combine(mods, ".rimtogether-stage-" + Guid.NewGuid().ToString("N"));
         var moved = new List<(string Original, string Backup)>();
         bool promoted = false;
+        bool retainRollback = false;
         try
         {
             ExtractSafe(archive, staging);
@@ -144,7 +145,11 @@ public sealed class ModManager(HttpClient http, string dataRoot, Action<string> 
             foreach (var old in existing)
             {
                 var saved = Path.Combine(backup, Path.GetFileName(old));
-                Directory.Move(old, saved); moved.Add((old, saved));
+                CopyVerifiedDirectory(old, saved);
+                // Rename only within Mods, on the game's volume. The durable copy may live on another drive.
+                var rollback = Path.Combine(staging, "rollback", Path.GetFileName(old));
+                Directory.CreateDirectory(Path.GetDirectoryName(rollback)!);
+                Directory.Move(old, rollback); moved.Add((old, rollback));
             }
             Directory.Move(incoming, destination); promoted = true;
             PrepareConfig(game, configPath, backup);
@@ -152,14 +157,56 @@ public sealed class ModManager(HttpClient http, string dataRoot, Action<string> 
             Storage.Write(state, hashes);
             log("Установлен Multiplayer " + Contract.Version + ". Резервная копия: " + backup);
         }
-        catch
+        catch (Exception installError)
         {
-            if (promoted) Directory.Delete(destination, true);
-            foreach (var pair in moved) Directory.Move(pair.Backup, pair.Original);
-            if (File.Exists(Path.Combine(backup, "ModsConfig.xml"))) File.Copy(Path.Combine(backup, "ModsConfig.xml"), configPath, true);
+            try
+            {
+                if (promoted) Directory.Delete(destination, true);
+                foreach (var pair in moved) Directory.Move(pair.Backup, pair.Original);
+                if (File.Exists(Path.Combine(backup, "ModsConfig.xml"))) File.Copy(Path.Combine(backup, "ModsConfig.xml"), configPath, true);
+            }
+            catch (Exception restoreError)
+            {
+                retainRollback = true;
+                throw new AggregateException("Откат требует восстановления; оригиналы оставлены в " + staging + ", резервная копия: " + backup, installError, restoreError);
+            }
             throw;
         }
-        finally { if (Directory.Exists(staging)) Directory.Delete(staging, true); }
+        finally { if (!retainRollback && Directory.Exists(staging)) Directory.Delete(staging, true); }
+    }
+
+    public static void CopyVerifiedDirectory(string source, string destination)
+    {
+        var root = Path.GetFullPath(source).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if ((Path.GetFullPath(destination).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar).StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            throw new IOException("Резервная копия не может находиться внутри исходного мода.");
+        if (Directory.Exists(destination)) throw new IOException("Папка резервной копии уже существует: " + destination);
+        var temp = destination + ".copy-" + Guid.NewGuid().ToString("N");
+        Directory.CreateDirectory(temp);
+        try
+        {
+            var pending = new Stack<(string Source, string Target)>(); pending.Push((source, temp));
+            while (pending.Count != 0)
+            {
+                var pair = pending.Pop();
+                foreach (var directory in Directory.GetDirectories(pair.Source))
+                {
+                    if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0)
+                        throw new IOException("Внутри мода найдена ссылка на папку; исходный мод сохранён: " + directory);
+                    var target = Path.Combine(pair.Target, Path.GetFileName(directory));
+                    Directory.CreateDirectory(target); pending.Push((directory, target));
+                }
+                foreach (var file in Directory.GetFiles(pair.Source))
+                {
+                    var target = Path.Combine(pair.Target, Path.GetFileName(file));
+                    var expected = Hash(file); File.Copy(file, target, false);
+                    if (!Hash(target).Equals(expected, StringComparison.Ordinal))
+                        throw new IOException("Не прошла проверка резервной копии: " + file);
+                }
+            }
+            Directory.Move(temp, destination); // Both paths share the backup directory and volume.
+        }
+        finally { if (Directory.Exists(temp)) Directory.Delete(temp, true); }
     }
 
     private static void PrepareConfig(string game, string path, string backup)

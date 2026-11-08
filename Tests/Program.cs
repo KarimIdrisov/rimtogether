@@ -19,6 +19,15 @@ try
     using (var zip = ZipFile.Open(evil, ZipArchiveMode.Create)) { using var writer = new StreamWriter(zip.CreateEntry("../escape.txt").Open()); writer.Write("bad"); }
     Throws(() => ModManager.ExtractSafe(evil, Path.Combine(fixture, "extract")), "archive traversal rejected");
     Check(!File.Exists(Path.Combine(fixture, "escape.txt")), "traversal writes nothing outside staging");
+    var copySource = Path.Combine(fixture, "copy-source"); Directory.CreateDirectory(Path.Combine(copySource, "nested", "empty"));
+    File.WriteAllBytes(Path.Combine(copySource, "nested", "original.bin"), [1, 2, 3, 4]);
+    var copyTarget = Path.Combine(fixture, "copied-backup"); ModManager.CopyVerifiedDirectory(copySource, copyTarget);
+    Check(File.ReadAllBytes(Path.Combine(copyTarget, "nested", "original.bin")).SequenceEqual(new byte[] { 1, 2, 3, 4 }) && Directory.Exists(Path.Combine(copyTarget, "nested", "empty")), "verified backup copies nested bytes and empty directories without moving original");
+    Check(File.Exists(Path.Combine(copySource, "nested", "original.bin")), "backup leaves original folder intact before same-volume rename");
+    Throws(() => ModManager.CopyVerifiedDirectory(copySource, Path.Combine(copySource, "recursive")), "backup inside original tree rejected before recursion");
+    using (var locked = new FileStream(Path.Combine(copySource, "nested", "original.bin"), FileMode.Open, FileAccess.Read, FileShare.None))
+        Throws(() => ModManager.CopyVerifiedDirectory(copySource, Path.Combine(fixture, "failed-backup")), "failed backup leaves original untouched");
+    Check(!Directory.Exists(Path.Combine(fixture, "failed-backup")), "partial backup is never promoted to completed backup");
     if (args.Length < 1) throw new Exception("Provide official mod ZIP path; an optional second argument selects a real replay");
     var replayPath = args.Length > 1 ? args[1] : SyntheticReplay.Create(Path.Combine(fixture, "synthetic-replay.zip"));
     if (Environment.GetEnvironmentVariable("RIMTOGETHER_TEST_REPLAY") is { Length: > 0 } export)
