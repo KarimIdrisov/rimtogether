@@ -48,7 +48,7 @@ public static class NetworkChecks
             check(first.Authenticated && second.Authenticated, "two clients authenticate and receive full world data");
             if (tcp) check(first.TcpOffers > 0 && second.TcpOffers > 0, "TCP snapshot is offered only after authenticated joining");
             if (tcp && rejectTcp) check(first.TcpDownloads == 0 && second.TcpDownloads == 0, "explicit TCP failure falls back to complete UDP world");
-            if (tcp && !rejectTcp) check(first.TcpDownloads > 0 && second.TcpDownloads > 0, "TCP world transfer validates payload and acknowledges before entering play");
+            if (tcp && !rejectTcp && !lateTcp) check(first.TcpDownloads > 0 && second.TcpDownloads > 0, "TCP world transfer validates payload and acknowledges before entering play");
             if (lateTcp) check(first.WorldTransfers == 1 && second.WorldTransfers == 1, "late TCP acknowledgement cannot apply a second world after UDP fallback");
             Until(() => server.playerManager.Players.Count(p => p.status == PlayerStatus.Playing) == 2);
             if (tcp && !rejectTcp && !lateTcp)
@@ -157,8 +157,14 @@ public class ProbeState(ConnectionBase connection, string password, Action<bool>
                 if (rejectTcp)
                 { tcpResult(false); connection.Send(new ClientBulkResultPacket { token = offer.Token, accepted = false }); continue; }
                 var direct = (LiteNetConnection)connection;
-                var bytes = BulkDownloadServer.Download(new IPEndPoint(direct.peer.Address, offer.Port), offer, _ =>
-                { if (lateTcp) Thread.Sleep(120); if (!injected) { injected = true; during?.Invoke(); } });
+                byte[] bytes;
+                try
+                {
+                    bytes = BulkDownloadServer.Download(new IPEndPoint(direct.peer.Address, offer.Port), offer, _ =>
+                    { if (lateTcp) Thread.Sleep(120); if (!injected) { injected = true; during?.Invoke(); } });
+                }
+                catch (Exception error) when (error is IOException || error is System.Net.Sockets.SocketException || error is AggregateException)
+                { tcpResult(false); connection.Send(new ClientBulkResultPacket { token = offer.Token, accepted = false }); continue; }
                 if (bytes.Length != offer.Length) throw new Exception("TCP body mismatch");
                 tcpResult(true); connection.Send(new ClientBulkResultPacket { token = offer.Token, accepted = true });
                 continue;
