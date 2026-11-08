@@ -84,6 +84,12 @@ try
     Check(unsafeRollback.Tag != Contract.Tag, "guard checkpoint tag prevents old launcher from silently replaying guard commands");
     RecoveryChecks.Run(checkpoint, Check, Throws);
     NetworkChecks.Run(checkpoint, Check);
+    NetworkChecks.Run(checkpoint, Check, tcp: true);
+    NetworkChecks.Run(checkpoint, Check, tcp: true, rejectTcp: true);
+    NetworkChecks.Run(checkpoint, Check, tcp: true, lateTcp: true);
+    BulkChecks.Run(Check, Throws);
+    Checkpoint.FromReplay(SyntheticReplay.Create(Path.Combine(fixture, "compatible-guard.zip"), 5401, true)).Validate();
+    Check(true, "previous guard command history remains compatible across transport-only protocol upgrade");
     var server = new MultiplayerServer(new ServerSettings()); checkpoint.Apply(server);
     server.commands.Send(CommandType.PauseAll, -1, -1, []);
     server.gameTimer += 9;

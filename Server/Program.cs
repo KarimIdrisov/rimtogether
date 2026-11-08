@@ -26,9 +26,10 @@ try
     else checkpoint = Checkpoint.FromReplay(config.SeedReplay);
     if (checkpoint.ClientProtocol != Contract.Protocol)
     {
-        Storage.Write(Path.Combine(directory, "checkpoint.pre-guard.json"), checkpoint, keepRawBackup: false);
+        var backup = Path.Combine(directory, "checkpoint.before-protocol-" + checkpoint.ClientProtocol + ".json");
+        if (!File.Exists(backup)) Storage.Write(backup, checkpoint, keepRawBackup: false);
         checkpoint.ClientProtocol = Contract.Protocol; checkpoint.Tag = Checkpoint.GuardTag;
-        Console.WriteLine("MIGRATION: fresh legacy snapshot imported; pre-guard copy retained. Historical replay was not re-executed.");
+        Console.WriteLine("MIGRATION: compatible snapshot imported; protocol backup retained.");
     }
     if (!IPAddress.TryParse(config.HostAddress, out var bind) || bind.AddressFamily != System.Net.Sockets.AddressFamily.InterNetwork)
         throw new InvalidDataException("Нужен IPv4 адаптера Radmin.");
@@ -46,6 +47,8 @@ try
     if (!LiteNetManager.Create(server, endpoints.ToArray(), out var manager))
     { manager.Stop(); throw new IOException("Не удалось занять UDP 30502. Проверь IP Radmin и другой запущенный сервер."); }
     server.netManagers.Add(manager);
+    try { server.BulkDownloads = new BulkDownloadServer(endpoints, Console.WriteLine); Console.WriteLine("BULK TCP enabled on port " + Contract.Port); }
+    catch (Exception error) { Console.WriteLine("BULK TCP unavailable; UDP remains active: " + error.Message); }
     // Preserve a healthy recovered backup instead of backing up corrupt primary bytes.
     Storage.Write(stateFile, checkpoint, keepRawBackup: false);
     var thread = new Thread(server.Run) { Name = "RimTogether server" };

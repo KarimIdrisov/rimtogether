@@ -46,7 +46,7 @@ foreach ($pair in @(
     Copy-Item -LiteralPath (Join-Path $upstream $pair[0]) -Destination $target -Force
     $guardFiles[$pair[1]] = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
 }
-@{ Revision='rt-guard1'; Protocol=5401; Files=$guardFiles } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $guardRoot 'manifest.json') -Encoding utf8NoBOM
+@{ Revision='rt-guard1'; Protocol=5402; Files=$guardFiles } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $guardRoot 'manifest.json') -Encoding utf8NoBOM
 $previousExport = $env:RIMTOGETHER_TEST_REPLAY
 $previousGuardPayload = $env:RIMTOGETHER_GUARD_PAYLOAD
 try {
@@ -63,7 +63,7 @@ foreach ($project in @('Launcher', 'Server', 'Bootstrap')) {
 }
 $previousIntegration = $env:RIMTOGETHER_INTEGRATION_DIR
 try {
-    $env:RIMTOGETHER_INTEGRATION_DIR = Join-Path $cache 'process-test-guard1'
+    $env:RIMTOGETHER_INTEGRATION_DIR = Join-Path $cache 'process-test-transport2'
     python (Join-Path $sourceRoot 'integration.py') (Join-Path $cache 'synthetic-replay.zip') (Join-Path $destinationFull 'server/RimTogether.Server.exe')
     if ($LASTEXITCODE -ne 0) { throw 'Standalone process integration tests failed' }
 } finally { $env:RIMTOGETHER_INTEGRATION_DIR = $previousIntegration }

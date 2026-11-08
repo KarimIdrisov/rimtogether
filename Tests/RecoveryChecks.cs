@@ -8,7 +8,7 @@ public static class RecoveryChecks
 {
     public static void Run(Checkpoint source, Action<bool, string> check, Action<Action, string> throws)
     {
-        check(MpVersion.Protocol == Contract.Protocol && Contract.Protocol == 5401, "guard client/server have an isolated matching protocol");
+        check(MpVersion.Protocol == Contract.Protocol && Contract.Protocol == 5402, "guard client/server have an isolated matching protocol");
         check(RecoveryPolicy.ShouldUpload(false, false, false, false, true), "dedicated host uploads fresh world snapshots");
         check(!RecoveryPolicy.ShouldUpload(false, false, false, false, false) && !RecoveryPolicy.ShouldUpload(true, false, false, false, true), "friend and replay simulation cannot publish authoritative world");
         var budget = new AutoRecoveryBudget();

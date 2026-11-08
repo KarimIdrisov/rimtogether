@@ -1,8 +1,189 @@
+diff --git a/Source/Common/BulkDownloads.cs b/Source/Common/BulkDownloads.cs
+new file mode 100644
+index 0000000..414486c
+--- /dev/null
++++ b/Source/Common/BulkDownloads.cs
+@@ -0,0 +1,140 @@
++using System;
++using System.Collections.Generic;
++using System.Diagnostics;
++using System.IO;
++using System.Linq;
++using System.Net;
++using System.Net.Sockets;
++using System.Security.Cryptography;
++using System.Text;
++using System.Threading;
++using System.Threading.Tasks;
++
++namespace Multiplayer.Common;
++
++public sealed class BulkOffer
++{
++    public string Token;
++    public string Hash;
++    public int Length;
++    public int Port;
++}
++
++public sealed class BulkDownloadServer : IDisposable
++{
++    private sealed class Entry { public IPAddress Address; public byte[] Data; public long Created; }
++    private readonly Dictionary<string, Entry> offers = new();
++    private readonly List<TcpListener> listeners = new();
++    private readonly HashSet<TcpClient> clients = new();
++    private readonly Action<string> log;
++    private bool disposed;
++    private const int MaxBytes = ConnectionBase.MaxFragmentPacketTotalSize - 6;
++
++    public BulkDownloadServer(IEnumerable<IPEndPoint> endpoints, Action<string> logger)
++    {
++        log = logger;
++        try
++        {
++            foreach (var endpoint in endpoints)
++            {
++                var listener = new TcpListener(endpoint); listener.Start(8); listeners.Add(listener);
++                _ = Accept(listener);
++            }
++        }
++        catch { Dispose(); throw; }
++    }
++    public int Port => ((IPEndPoint)listeners[0].LocalEndpoint).Port;
++    public BulkOffer Offer(IPAddress address, byte[] data)
++    {
++        if (data.Length == 0 || data.Length > MaxBytes) throw new InvalidDataException("Invalid bulk snapshot size");
++        var nonce = new byte[32]; using (var random = RandomNumberGenerator.Create()) random.GetBytes(nonce);
++        var token = Hex(nonce);
++        lock (offers)
++        {
++            foreach (var old in offers.Where(kv => Stopwatch.GetTimestamp() - kv.Value.Created > 30L * Stopwatch.Frequency).Select(kv => kv.Key).ToArray()) offers.Remove(old);
++            if (disposed || offers.Count >= 4) throw new IOException("Bulk transfer queue unavailable");
++            offers.Add(token, new Entry { Address = address, Data = data, Created = Stopwatch.GetTimestamp() });
++        }
++        return new BulkOffer { Token = token, Length = data.Length, Hash = Hash(data), Port = Port };
++    }
++    public void Revoke(string token) { lock (offers) offers.Remove(token); }
++    public static string Hex(byte[] bytes) => BitConverter.ToString(bytes).Replace("-", "");
++    public static string Hash(byte[] bytes) { using var hash = SHA256.Create(); return Hex(hash.ComputeHash(bytes)); }
++    private async Task Accept(TcpListener listener)
++    {
++        while (!disposed)
++        {
++            TcpClient client;
++            try { client = await listener.AcceptTcpClientAsync().ConfigureAwait(false); }
++            catch (Exception error) when (error is SocketException || error is ObjectDisposedException) { return; }
++            lock (clients)
++            {
++                if (disposed || clients.Count >= 4) { client.Close(); continue; }
++                clients.Add(client);
++            }
++            _ = Task.Run(() => Serve(client));
++        }
++    }
++    private void Serve(TcpClient client)
++    {
++        try
++        {
++            client.NoDelay = true; client.ReceiveTimeout = 5000; client.SendTimeout = 5000;
++            client.SendBufferSize = 1024 * 1024;
++            using var stream = client.GetStream();
++            var token = Encoding.ASCII.GetString(ReadExactly(stream, 64));
++            Entry entry;
++            lock (offers)
++            {
++                if (!offers.TryGetValue(token, out entry) ||
++                    !entry.Address.Equals(((IPEndPoint)client.Client.RemoteEndPoint).Address) ||
++                    Stopwatch.GetTimestamp() - entry.Created > 30L * Stopwatch.Frequency) return;
++                offers.Remove(token); // One use, bound to the authenticated UDP peer's IP.
++            }
++            var watch = Stopwatch.StartNew();
++            var length = BitConverter.GetBytes(entry.Data.Length); stream.Write(length, 0, length.Length);
++            for (var offset = 0; offset < entry.Data.Length; offset += 65536)
++                stream.Write(entry.Data, offset, Math.Min(65536, entry.Data.Length - offset));
++            stream.Flush();
++            log($"BULK TCP: {entry.Data.Length} bytes written in {watch.ElapsedMilliseconds}ms");
++        }
++        catch (Exception error) when (error is IOException || error is SocketException || error is ObjectDisposedException)
++        { if (!disposed) log("BULK TCP interrupted: " + error.Message); }
++        finally { lock (clients) clients.Remove(client); client.Close(); }
++    }
++    public static byte[] ReadExactly(Stream stream, int length, Action<int> progress = null)
++    {
++        var bytes = new byte[length]; int offset = 0;
++        while (offset < length)
++        {
++            var count = stream.Read(bytes, offset, Math.Min(65536, length - offset));
++            if (count == 0) throw new EndOfStreamException("Incomplete TCP snapshot");
++            offset += count; progress?.Invoke(offset);
++        }
++        return bytes;
++    }
++    public static byte[] Download(IPEndPoint endpoint, BulkOffer offer, Action<int> progress, CancellationToken cancellation = default)
++    {
++        if (offer.Length <= 0 || offer.Length > MaxBytes || offer.Token?.Length != 64 || offer.Hash?.Length != 64)
++            throw new InvalidDataException("Invalid TCP offer");
++        using var client = new TcpClient(AddressFamily.InterNetwork);
++        using var cancelRegistration = cancellation.Register(() => client.Close());
++        client.NoDelay = true; client.ReceiveTimeout = 5000; client.SendTimeout = 5000; client.ReceiveBufferSize = 1024 * 1024;
++        var connect = client.ConnectAsync(endpoint.Address, endpoint.Port);
++        if (!connect.Wait(2000)) throw new IOException("TCP connect timed out; UDP fallback requested");
++        using var stream = client.GetStream();
++        var token = Encoding.ASCII.GetBytes(offer.Token); stream.Write(token, 0, token.Length);
++        var length = BitConverter.ToInt32(ReadExactly(stream, 4), 0);
++        if (length != offer.Length) throw new InvalidDataException("TCP snapshot length mismatch");
++        var data = ReadExactly(stream, length, progress);
++        if (!Hash(data).Equals(offer.Hash, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("TCP snapshot SHA256 mismatch");
++        return data;
++    }
++    public void Dispose()
++    {
++        disposed = true;
++        foreach (var listener in listeners) listener.Stop();
++        lock (clients) foreach (var client in clients) client.Close();
++        lock (offers) offers.Clear();
++    }
++}
+diff --git a/Source/Common/CommandHandler.cs b/Source/Common/CommandHandler.cs
+index ef7b43b..82733ed 100644
+--- a/Source/Common/CommandHandler.cs
++++ b/Source/Common/CommandHandler.cs
+@@ -65,6 +65,9 @@ namespace Multiplayer.Common
+             }
+ 
+             SentCmds++;
++            foreach (var player in server.playerManager.Players)
++                if (player.conn.StateObj is ServerLoadingState { SnapshotCaptured: true } loading)
++                    loading.BufferCommand(ServerCommandPacket.From(cmd));
+         }
+ 
+         public void PauseAll()
+diff --git a/Source/Common/LiteNetManager.cs b/Source/Common/LiteNetManager.cs
+index e8b03ab..139a6fc 100644
+--- a/Source/Common/LiteNetManager.cs
++++ b/Source/Common/LiteNetManager.cs
+@@ -47,6 +47,7 @@ namespace Multiplayer.Common
+                 return new NetManager(new MpServerNetListener(server, false))
+                 {
+                     EnableStatistics = true,
++                    MtuDiscovery = true,
+                     IPv6Enabled = ipv6
+                 };
+             }
 diff --git a/Source/Common/MultiplayerServer.cs b/Source/Common/MultiplayerServer.cs
-index 88ddbc0..12697e7 100644
+index 88ddbc0..6a94833 100644
 --- a/Source/Common/MultiplayerServer.cs
 +++ b/Source/Common/MultiplayerServer.cs
-@@ -94,6 +94,8 @@ namespace Multiplayer.Common
+@@ -39,6 +39,8 @@ namespace Multiplayer.Common
+         public ChatCmdManager chatCmdManager;
+         public PlayerManager playerManager;
+         public List<INetManager> netManagers = [];
++        public BulkDownloadServer? BulkDownloads;
++        public int BulkAckTimeoutMilliseconds = 60_000;
+         public IEnumerable<ServerPlayer> JoinedPlayers => playerManager.JoinedPlayers;
+         public IEnumerable<ServerPlayer> PlayingPlayers => playerManager.PlayingPlayers;
+         public IEnumerable<ServerPlayer> PlayingIngamePlayers => playerManager.PlayingPlayers.Where(p => p.status == PlayerStatus.Playing);
+@@ -94,6 +96,8 @@ namespace Multiplayer.Common
  
          public void Run()
          {
@@ -11,7 +192,7 @@ index 88ddbc0..12697e7 100644
              ServerLog.Detail("Server started");
  
              Stopwatch time = Stopwatch.StartNew();
-@@ -115,6 +117,7 @@ namespace Multiplayer.Common
+@@ -115,6 +119,7 @@ namespace Multiplayer.Common
                      queue.RunQueue(ServerLog.Error);
                      netManagers.ForEach(manager => manager.Tick());
                      TickNet();
@@ -19,7 +200,7 @@ index 88ddbc0..12697e7 100644
  
                      int ticked = 0;
                      while (realTime > 0 && ticked < 2)
-@@ -170,6 +173,7 @@ namespace Multiplayer.Common
+@@ -170,6 +175,7 @@ namespace Multiplayer.Common
              {
                  ServerLog.Log($"Exception stopping the server: {e}");
              }
@@ -27,7 +208,15 @@ index 88ddbc0..12697e7 100644
          }
  
          private void TickNet()
-@@ -215,6 +219,14 @@ namespace Multiplayer.Common
+@@ -206,6 +212,7 @@ namespace Multiplayer.Common
+ 
+             playerManager.OnServerStop();
+             netManagers.ForEach(manager => manager.Stop());
++            BulkDownloads?.Dispose();
+ 
+             instance = null;
+         }
+@@ -215,6 +222,14 @@ namespace Multiplayer.Common
              queue.Enqueue(action);
          }
  
@@ -69,6 +258,39 @@ index a1ca6a7..970c387 100644
      }
  
      /// <summary>
+diff --git a/Source/Common/Networking/ConnectionBase.cs b/Source/Common/Networking/ConnectionBase.cs
+index 9499534..645c038 100644
+--- a/Source/Common/Networking/ConnectionBase.cs
++++ b/Source/Common/Networking/ConnectionBase.cs
+@@ -70,6 +70,7 @@ namespace Multiplayer.Common
+         // We can send a single packet up to MaxSinglePacketSize but when specifically sending a fragmented packet,
+         // use smaller sizes so that we have more control over them.
+         public const int MaxFragmentPacketSize = 1024;
++        protected virtual int FragmentPacketSize => MaxFragmentPacketSize;
+         // Max size of a packet that can be sent fragmented. It is not possible to send any packets larger than this.
+         public const int MaxFragmentPacketTotalSize = 33_554_432;
+ 
+@@ -93,7 +94,7 @@ namespace Multiplayer.Common
+             }
+ 
+             // every packet has an additional 2 bytes of overhead
+-            const int maxFragmentSize = MaxFragmentPacketSize - 2;
++            int maxFragmentSize = FragmentPacketSize - 2;
+             // the first packet has an additional 6 bytes of overhead
+             var totalLength = message.Length + 6;
+             if (totalLength > MaxFragmentPacketTotalSize)
+diff --git a/Source/Common/Networking/LiteNetConnection.cs b/Source/Common/Networking/LiteNetConnection.cs
+index b3a8c5d..09fe2ff 100644
+--- a/Source/Common/Networking/LiteNetConnection.cs
++++ b/Source/Common/Networking/LiteNetConnection.cs
+@@ -6,6 +6,7 @@ namespace Multiplayer.Common
+     public class LiteNetConnection(NetPeer peer) : ConnectionBase
+     {
+         public readonly NetPeer peer = peer;
++        protected override int FragmentPacketSize => System.Math.Min(1400, peer.GetMaxSinglePacketSize(DeliveryMethod.ReliableOrdered));
+ 
+         protected override void SendRaw(byte[] raw, bool reliable)
+         {
 diff --git a/Source/Common/Networking/NetworkingLiteNet.cs b/Source/Common/Networking/NetworkingLiteNet.cs
 index 374d848..5e0b22a 100644
 --- a/Source/Common/Networking/NetworkingLiteNet.cs
@@ -82,6 +304,22 @@ index 374d848..5e0b22a 100644
                  return;
              }
  
+diff --git a/Source/Common/Networking/Packet/BulkResultPacket.cs b/Source/Common/Networking/Packet/BulkResultPacket.cs
+new file mode 100644
+index 0000000..95cd9a7
+--- /dev/null
++++ b/Source/Common/Networking/Packet/BulkResultPacket.cs
+@@ -0,0 +1,10 @@
++namespace Multiplayer.Common.Networking.Packet;
++
++// WorldRequest is otherwise only consumed during the initial joining state.
++[PacketDefinition(Packets.Client_WorldRequest)]
++public record struct ClientBulkResultPacket : IPacket
++{
++    public string token;
++    public bool accepted;
++    public void Bind(PacketBuffer buf) { buf.Bind(ref token, maxLength: 64); buf.Bind(ref accepted); }
++}
 diff --git a/Source/Common/Networking/Packet/JoinDataPacket.cs b/Source/Common/Networking/Packet/JoinDataPacket.cs
 index 641d493..97edd20 100644
 --- a/Source/Common/Networking/Packet/JoinDataPacket.cs
@@ -135,10 +373,45 @@ index ebf0895..a9f432e 100644
              mpVersion = MpVersion.Version,
              defStatus = defStatus,
 diff --git a/Source/Common/Networking/State/ServerLoadingState.cs b/Source/Common/Networking/State/ServerLoadingState.cs
-index 7663880..61661a8 100644
+index 7663880..361acde 100644
 --- a/Source/Common/Networking/State/ServerLoadingState.cs
 +++ b/Source/Common/Networking/State/ServerLoadingState.cs
-@@ -19,7 +19,7 @@ public class ServerLoadingState : AsyncConnectionState
+@@ -1,11 +1,34 @@
+ ﻿using System.Collections.Generic;
+ using System.Threading.Tasks;
++using System;
++using System.Linq;
+ using Multiplayer.Common.Networking.Packet;
+ 
+ namespace Multiplayer.Common;
+ 
+ public class ServerLoadingState : AsyncConnectionState
+ {
++    private string bulkToken;
++    public bool SnapshotCaptured { get; private set; }
++    private readonly List<ServerCommandPacket> pendingCommands = new();
++    private bool readyAfterTcp;
++    [PacketHandler(Packets.Client_WorldReady)]
++    public void HandleEarlyWorldReady(ByteReader data)
++    {
++        if (bulkToken != null && bulkResult.Task.Status == TaskStatus.RanToCompletion && bulkResult.Task.Result)
++            readyAfterTcp = true;
++    }
++    public void BufferCommand(ServerCommandPacket command) => pendingCommands.Add(command);
++    private readonly TaskCompletionSource<bool> bulkResult = new(TaskCreationOptions.RunContinuationsAsynchronously);
++    [TypedPacketHandler]
++    public void HandleBulkResult(ClientBulkResultPacket packet)
++    { if (packet.token == bulkToken) bulkResult.TrySetResult(packet.accepted); }
++    public override void OnDisconnect()
++    {
++        base.OnDisconnect();
++        if (bulkToken != null) Server.BulkDownloads?.Revoke(bulkToken);
++        bulkResult.TrySetResult(false);
++    }
+     public ServerLoadingState(ConnectionBase connection) : base(connection)
+     {
+     }
+@@ -19,7 +42,7 @@ public class ServerLoadingState : AsyncConnectionState
          Player.keepAliveAt = Server.NetTimer;
  
          if (Player.IsHost)
@@ -147,11 +420,82 @@ index 7663880..61661a8 100644
  
          var idMatched = Player.keepAliveId == packet.id;
          connection.OnKeepAliveArrived(idMatched);
+@@ -32,15 +55,51 @@ public class ServerLoadingState : AsyncConnectionState
+         await Server.worldData.WaitJoinPoint();
+         await EndIfDead();
+ 
+-        SendWorldData();
++        SnapshotCaptured = true;
++        var data = BuildWorldData();
++        var usedTcp = false;
++        if (Server.BulkDownloads != null && connection is LiteNetConnection direct)
++        {
++            try
++            {
++                var offer = Server.BulkDownloads.Offer(direct.peer.Address, data); bulkToken = offer.Token;
++                var start = new ByteWriter(); start.WriteBool(true); start.WriteInt32(offer.Port);
++                start.WriteString(offer.Token); start.WriteInt32(offer.Length); start.WriteString(offer.Hash);
++                connection.Send(new SerializedPacket(Packets.Server_WorldDataStart, start.ToArray()));
++                var completed = await Task.WhenAny(bulkResult.Task, Task.Delay(Math.Min(600_000, Server.BulkAckTimeoutMilliseconds + data.Length / 100)));
++                await EndIfDead();
++                usedTcp = completed == bulkResult.Task && bulkResult.Task.Result;
++            }
++            catch (Exception error) { ServerLog.Error("TCP offer failed, using UDP: " + error.Message); }
++            if (bulkToken != null) Server.BulkDownloads.Revoke(bulkToken);
++        }
++        if (!usedTcp)
++        {
++            pendingCommands.Clear(); // New capture includes everything received while TCP was pending.
++            SendWorldData(BuildWorldData());
++        }
++        else
++        {
++            var confirm = new ByteWriter(); confirm.WriteByte(2); confirm.WriteString(bulkToken);
++            connection.Send(new SerializedPacket(Packets.Server_WorldDataStart, confirm.ToArray()));
++            foreach (var command in pendingCommands) connection.Send(command);
++        }
++        SnapshotCaptured = false; pendingCommands.Clear();
+ 
+         Player.SendPlayerList();
+         connection.ChangeState(ConnectionStateEnum.ServerPlaying);
++        if (readyAfterTcp) { Player.simulating = false; Player.UpdateStatus(PlayerStatus.Playing); }
+     }
+ 
+-    public void SendWorldData()
++    public void SendWorldData() => SendWorldData(BuildWorldData());
++    private void SendWorldData(byte[] packetData)
++    {
++        connection.Send(new SerializedPacket(Packets.Server_WorldDataStart, ByteWriter.GetBytes(false)));
++        connection.SendFragmented(Packets.Server_WorldData, packetData);
++        ServerLog.Log("World response UDP sent: " + packetData.Length);
++    }
++    private byte[] BuildWorldData()
+     {
+-        connection.Send(Packets.Server_WorldDataStart);
+ 
+         ByteWriter writer = new ByteWriter();
+ 
+@@ -83,9 +142,6 @@ public class ServerLoadingState : AsyncConnectionState
+         foreach (var syncInfo in Server.worldData.syncInfos)
+             writer.WritePrefixedBytes(syncInfo);
+ 
+-        byte[] packetData = writer.ToArray();
+-        connection.SendFragmented(Packets.Server_WorldData, packetData);
+-
+-        ServerLog.Log("World response sent: " + packetData.Length);
++        return writer.ToArray();
+     }
+ }
 diff --git a/Source/Common/Networking/State/ServerPlayingState.cs b/Source/Common/Networking/State/ServerPlayingState.cs
-index c6d22e2..6580216 100644
+index c6d22e2..0a1e88b 100644
 --- a/Source/Common/Networking/State/ServerPlayingState.cs
 +++ b/Source/Common/Networking/State/ServerPlayingState.cs
-@@ -9,12 +9,15 @@ namespace Multiplayer.Common
+@@ -6,15 +6,20 @@ namespace Multiplayer.Common
+ {
+     public class ServerPlayingState(ConnectionBase conn) : MpConnectionState(conn)
+     {
++        [TypedPacketHandler]
++        public void HandleLateBulkResult(ClientBulkResultPacket packet) { }
          [PacketHandler(Packets.Client_WorldReady)]
          public void HandleWorldReady(ByteReader data)
          {
@@ -167,7 +511,7 @@ index c6d22e2..6580216 100644
              connection.ChangeState(ConnectionStateEnum.ServerLoading);
              Player.ResetTimeVotes();
          }
-@@ -83,25 +86,30 @@ namespace Multiplayer.Common
+@@ -83,25 +88,30 @@ namespace Multiplayer.Common
          [PacketHandler(Packets.Client_WorldDataUpload, allowFragmented: true)]
          public void HandleWorldDataUpload(ByteReader data)
          {
@@ -206,7 +550,7 @@ index c6d22e2..6580216 100644
          }
  
          [TypedPacketHandler]
-@@ -131,7 +139,7 @@ namespace Multiplayer.Common
+@@ -131,7 +141,7 @@ namespace Multiplayer.Common
              Player.keepAliveAt = Server.NetTimer;
  
              if (Player.IsHost)
@@ -344,7 +688,7 @@ index 0000000..7819f0f
 +    }
 +}
 diff --git a/Source/Common/Version.cs b/Source/Common/Version.cs
-index be9f185..c98d381 100644
+index be9f185..4e851d4 100644
 --- a/Source/Common/Version.cs
 +++ b/Source/Common/Version.cs
 @@ -6,13 +6,13 @@ namespace Multiplayer.Common
@@ -352,7 +696,7 @@ index be9f185..c98d381 100644
      {
          public const string SimpleVersion = "0.11.5";
 -        public const int Protocol = 54;
-+        public const int Protocol = 5401; // RimTogether Guard: numbered world uploads.
++        public const int Protocol = 5402; // Guard: numbered snapshots plus authenticated TCP bulk download.
  
          public static readonly string? GitHash = Assembly.GetExecutingAssembly()
              .GetCustomAttributes<AssemblyMetadataAttribute>()
