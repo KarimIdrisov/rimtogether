@@ -21,6 +21,7 @@ public static class NetworkChecks
         if (tcp) server.BulkDownloads = new BulkDownloadServer([new IPEndPoint(IPAddress.Loopback, 0)], Console.WriteLine);
         if (lateTcp) server.BulkAckTimeoutMilliseconds = 30;
         var port = manager.netManagers[0].manager.LocalPort;
+        manager.netManagers[0].manager.MtuOverride = 1404;
         if (!registered) { MpConnectionState.SetImplementation(ConnectionStateEnum.ClientJoining, typeof(ProbeState)); registered = true; }
         var thread = new Thread(server.Run); thread.Start();
         var clients = new List<Probe>();
@@ -99,6 +100,7 @@ public class Probe
         listener.NetworkReceiveEvent += (_, reader, _, method) =>
         { connection!.HandleReceiveRaw(new ByteReader(reader.GetRemainingBytes()), method == DeliveryMethod.ReliableOrdered); };
         Manager = new NetManager(listener) { IPv6Enabled = false };
+        Manager.MtuOverride = 1404;
     }
 }
 
@@ -139,8 +141,8 @@ public class ProbeState(ConnectionBase connection, string password, Action<bool>
         if (connection.username == "Alpha")
         {
             await TypedPacket<ServerInitDataRequestPacket>();
-            connection.Send(new ClientInitDataPacket { rwVersion = "1.6.4633", debugOnlySyncCmds = [], hostOnlySyncCmds = [],
-                modCtorRoundMode = RoundModeEnum.ToNearest, staticCtorRoundMode = RoundModeEnum.ToNearest, defInfos = [], rawData = [] });
+            connection.SendFragmented(new ClientInitDataPacket { rwVersion = "1.6.4633", debugOnlySyncCmds = [], hostOnlySyncCmds = [],
+                modCtorRoundMode = RoundModeEnum.ToNearest, staticCtorRoundMode = RoundModeEnum.ToNearest, defInfos = [], rawData = new byte[200_000] }.Serialize());
         }
         var packet = await Packet(Packets.Server_UsernameOk); packet.Seek(packet.Length);
         connection.Send(new ClientJoinDataPacket { modCtorRoundMode = RoundModeEnum.ToNearest,

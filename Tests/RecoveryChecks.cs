@@ -72,6 +72,29 @@ public static class RecoveryChecks
         check(restarted.worldData.TryStartJoinPointCreation(), "restarted host counter cannot block fresh snapshots behind prior-session work ticks");
         restarted.worldData.AbortJoinPointCreation();
         CheckAffinity(MakeServer(), check);
+        CheckInitDisconnect(check);
+    }
+
+    private static void CheckInitDisconnect(Action<bool, string> check)
+    {
+        var server = MultiplayerServer.instance = new MultiplayerServer(new ServerSettings()) { IsStandaloneServer = true, hostUsername = "Host", running = true };
+        MemoryConn Connect()
+        {
+            var conn = new MemoryConn(); server.playerManager.OnConnected(conn); conn.ChangeState(ConnectionStateEnum.ServerJoining);
+            void Deliver(SerializedPacket packet)
+            {
+                var wire = new ByteWriter(); wire.WriteByte((byte)packet.id); wire.WriteRaw(packet.data);
+                conn.HandleReceiveRaw(new ByteReader(wire.ToArray()), true);
+            }
+            Deliver(ClientProtocolPacket.Current().Serialize()); Deliver(new ClientUsernamePacket("Host").Serialize()); return conn;
+        }
+        var first = Connect();
+        check(server.InitDataState == InitDataState.Requested, "host handshake requests initial config before receiving large payload");
+        server.playerManager.SetDisconnected(first, MpDisconnectReason.ClientLeft);
+        check(server.InitDataState == InitDataState.Waiting, "disconnect during init upload releases pending server config instead of requesting again on dead connection");
+        var second = Connect();
+        check(server.InitDataState == InitDataState.Requested, "new host connection can supply config after failed fragmented handshake");
+        server.playerManager.SetDisconnected(second, MpDisconnectReason.ClientLeft);
     }
 
     private static void CheckAffinity(MultiplayerServer server, Action<bool, string> check)

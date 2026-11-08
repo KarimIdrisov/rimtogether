@@ -259,18 +259,19 @@ index a1ca6a7..970c387 100644
  
      /// <summary>
 diff --git a/Source/Common/Networking/ConnectionBase.cs b/Source/Common/Networking/ConnectionBase.cs
-index 9499534..645c038 100644
+index 9499534..b66bf91 100644
 --- a/Source/Common/Networking/ConnectionBase.cs
 +++ b/Source/Common/Networking/ConnectionBase.cs
-@@ -70,6 +70,7 @@ namespace Multiplayer.Common
+@@ -70,6 +70,8 @@ namespace Multiplayer.Common
          // We can send a single packet up to MaxSinglePacketSize but when specifically sending a fragmented packet,
          // use smaller sizes so that we have more control over them.
          public const int MaxFragmentPacketSize = 1024;
 +        protected virtual int FragmentPacketSize => MaxFragmentPacketSize;
++        protected virtual int MaxReceivedFragmentSize => MaxFragmentPacketSize;
          // Max size of a packet that can be sent fragmented. It is not possible to send any packets larger than this.
          public const int MaxFragmentPacketTotalSize = 33_554_432;
  
-@@ -93,7 +94,7 @@ namespace Multiplayer.Common
+@@ -93,7 +95,7 @@ namespace Multiplayer.Common
              }
  
              // every packet has an additional 2 bytes of overhead
@@ -279,15 +280,27 @@ index 9499534..645c038 100644
              // the first packet has an additional 6 bytes of overhead
              var totalLength = message.Length + 6;
              if (totalLength > MaxFragmentPacketTotalSize)
+@@ -189,8 +191,8 @@ namespace Multiplayer.Common
+         private void HandleReceiveFragment(ByteReader reader, Packets packetType, PacketHandlerInfo handler)
+         {
+             if (!handler.Fragment) throw new PacketReadException($"Packet {packetType} can't be fragmented");
+-            if (reader.Left > MaxFragmentPacketSize)
+-                throw new PacketReadException($"Packet fragment {packetType} too big {reader.Left}>{MaxFragmentPacketSize}");
++            if (reader.Left > MaxReceivedFragmentSize)
++                throw new PacketReadException($"Packet fragment {packetType} too big {reader.Left}>{MaxReceivedFragmentSize}");
+ 
+             var fragId = reader.ReadByte();
+             var fragIndex = fragments.FindIndex(frag => frag.Item1 == fragId);
 diff --git a/Source/Common/Networking/LiteNetConnection.cs b/Source/Common/Networking/LiteNetConnection.cs
-index b3a8c5d..09fe2ff 100644
+index b3a8c5d..35807ea 100644
 --- a/Source/Common/Networking/LiteNetConnection.cs
 +++ b/Source/Common/Networking/LiteNetConnection.cs
-@@ -6,6 +6,7 @@ namespace Multiplayer.Common
+@@ -6,6 +6,8 @@ namespace Multiplayer.Common
      public class LiteNetConnection(NetPeer peer) : ConnectionBase
      {
          public readonly NetPeer peer = peer;
 +        protected override int FragmentPacketSize => System.Math.Min(1400, peer.GetMaxSinglePacketSize(DeliveryMethod.ReliableOrdered));
++        protected override int MaxReceivedFragmentSize => 1400;
  
          protected override void SendRaw(byte[] raw, bool reliable)
          {
@@ -560,7 +573,7 @@ index c6d22e2..0a1e88b 100644
              var idMatched = Player.keepAliveId == packet.id;
              connection.OnKeepAliveArrived(idMatched);
 diff --git a/Source/Common/PlayerManager.cs b/Source/Common/PlayerManager.cs
-index cc3da92..b44b75b 100644
+index cc3da92..5e46c50 100644
 --- a/Source/Common/PlayerManager.cs
 +++ b/Source/Common/PlayerManager.cs
 @@ -33,13 +33,14 @@ namespace Multiplayer.Common
@@ -581,7 +594,15 @@ index cc3da92..b44b75b 100644
              if (lastConnection.TryGetValue(id, out var last) && clock.ElapsedMilliseconds - last < ThrottleMillis)
                  return MpDisconnectReason.Throttled;
  
-@@ -71,7 +72,7 @@ namespace Multiplayer.Common
+@@ -66,12 +67,15 @@ namespace Multiplayer.Common
+         {
+             if (conn.State == ConnectionStateEnum.Disconnected) return;
+ 
++            // Failure callbacks may complete a pending typed packet inline. Mark the old state dead
++            // first, so it cannot start a second init-data request while this peer is being removed.
++            if (conn.StateObj != null) conn.StateObj.alive = false;
+             conn.StateObj?.OnDisconnect();
+ 
              ServerPlayer player = conn.serverPlayer;
              Players.Remove(player);
  
@@ -590,7 +611,7 @@ index cc3da92..b44b75b 100644
              {
                  server.worldData.AbortJoinPointCreation();
                  ServerLog.Log("Aborted join point creation because the host disconnected.");
-@@ -109,14 +110,20 @@ namespace Multiplayer.Common
+@@ -109,14 +113,20 @@ namespace Multiplayer.Common
          public void OnDesync(ServerPlayer player, int tick, int diffAt)
          {
              player.UpdateStatus(PlayerStatus.Desynced);
