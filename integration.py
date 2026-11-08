@@ -30,6 +30,8 @@ def session(expected=None):
         process.stdin.write('save\nstop\n'); process.stdin.flush()
         result = process.wait(timeout=15)
         if result: raise AssertionError('Server failed: ' + ''.join(captured))
+        assert any(line.startswith('CHECKPOINT OK ') and 'background-ms=' in line for line in captured), ''.join(captured)
+        assert any(line.startswith('STOPPED') for line in captured), ''.join(captured)
         print('PASS server start/save/stop; ' + next(x.strip() for x in captured if x.startswith('READY')))
     finally:
         if process.poll() is None: process.kill(); process.wait()

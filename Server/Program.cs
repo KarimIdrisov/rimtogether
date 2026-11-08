@@ -38,7 +38,7 @@ try
         directAddress = config.HostAddress + ":30502", gameName = "RimTogether — двое", hasPassword = true,
         password = config.Password, asyncTime = checkpoint.AsyncTime, multifaction = checkpoint.Multifaction,
         syncConfigs = true, desyncTraces = true, pauseOnJoin = true, pauseOnDesync = true,
-        autoJoinPoint = AutoJoinPointFlags.Join | AutoJoinPointFlags.Desync | AutoJoinPointFlags.Autosave };
+        autoJoinPoint = RecoveryCoordinator.AutomaticTriggers };
     var server = MultiplayerServer.instance = new MultiplayerServer(settings) { running = true, IsStandaloneServer = true,
         BootstrapMode = false, hostUsername = config.Username };
     checkpoint.Apply(server);
@@ -53,20 +53,23 @@ try
     Storage.Write(stateFile, checkpoint, keepRawBackup: false);
     var thread = new Thread(server.Run) { Name = "RimTogether server" };
     thread.Start();
-    var recovery = new RecoveryCoordinator(server, config.FastRecovery, Console.WriteLine);
+    using var writer = new CheckpointWriter(state =>
+    {
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        state.Validate(); Storage.Write(stateFile, state);
+        Console.WriteLine("CHECKPOINT OK tick=" + state.Tick + " background-ms=" + watch.ElapsedMilliseconds);
+    }, Console.WriteLine);
     int lastPersistedGeneration = server.worldData.SnapshotGeneration;
     int lastPersistAt = server.NetTimer;
     void Persist()
     {
         if (server.worldData.CreatingJoinPoint) { Console.WriteLine("CHECKPOINT WAIT: joinpoint in progress; previous checkpoint retained"); return; }
-        var state = Checkpoint.Capture(server); state.Validate(); Storage.Write(stateFile, state);
-        Console.WriteLine("CHECKPOINT OK tick=" + state.Tick);
+        writer.Submit(Checkpoint.CaptureImmutable(server));
     }
     using var timer = new Timer(_ => server.Enqueue(() =>
     {
         try
         {
-            recovery.Tick();
             if (server.worldData.SnapshotGeneration != lastPersistedGeneration || server.NetTimer - lastPersistAt >= MultiplayerServer.NetTicksPerSecond * 30)
             {
                 Persist(); lastPersistAt = server.NetTimer;
@@ -93,6 +96,7 @@ try
     thread.Join();
     // Includes /stop requested by the in-game host; the networking thread is stopped now.
     server.worldData.AbortJoinPointCreation(); Persist();
+    writer.Complete();
     Console.WriteLine("STOPPED"); return 0;
 }
 catch (Exception e) { Console.Error.WriteLine("SERVER ERROR: " + e); return 1; }

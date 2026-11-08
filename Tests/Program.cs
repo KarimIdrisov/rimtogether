@@ -86,6 +86,7 @@ try
     Check(mechanics == GameFingerprint.Compute(game, config), "translation text does not change mechanics fingerprint");
     BundleChecks.Run(Path.Combine(fixture, "bundles"), Check, Throws);
     var checkpoint = Checkpoint.FromReplay(replayPath); checkpoint.Validate();
+    CheckpointWriterChecks.Run(checkpoint, Check, Throws);
     var legacyFresh = Checkpoint.FromReplay(SyntheticReplay.Create(Path.Combine(fixture, "legacy-full.zip"), 53));
     Check(legacyFresh.Tick == legacyFresh.StartingTick, "full legacy save safely imports without historical resimulation");
     Throws(() => Checkpoint.FromReplay(SyntheticReplay.Create(Path.Combine(fixture, "legacy-history.zip"), 54, true)), "legacy historical replay is blocked before changed RNG rules can alter its past");

@@ -61,6 +61,16 @@ public sealed class Checkpoint
         ClientProtocol = Contract.Protocol
     };
 
+    public static Checkpoint CaptureImmutable(MultiplayerServer server)
+    {
+        var captured = Capture(server);
+        // Compressed world/map/command byte arrays are immutable after publication.
+        // Copy mutable collections while still on the owning server thread.
+        captured.Maps = new Dictionary<int, byte[]>(captured.Maps);
+        captured.Commands = captured.Commands.ToDictionary(kv => kv.Key, kv => new List<byte[]>(kv.Value));
+        return captured;
+    }
+
     public void Validate()
     {
         if (Schema != 1 || World == null || World.Length == 0 || Maps == null || Commands == null || Session == null || Tick < StartingTick)

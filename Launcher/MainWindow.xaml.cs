@@ -80,9 +80,8 @@ public partial class MainWindow : Window
         var running = server != null && !server.HasExited;
         PlayButton.IsEnabled = true; StartButton.IsEnabled = Role.SelectedIndex == 0 && !running;
         StopButton.IsEnabled = running;
-        FastRecovery.Content = Role.SelectedIndex == 0
-            ? "Быстрый синк хоста: свежая точка мира примерно каждые 90 секунд"
-            : "Быстрый синк друга: одна автоматическая попытка восстановления";
+        FastRecovery.Visibility = Role.SelectedIndex == 0 ? Visibility.Collapsed : Visibility.Visible;
+        RecoveryModeHint.Visibility = Role.SelectedIndex == 0 ? Visibility.Visible : Visibility.Collapsed;
         Role.IsEnabled = Username.IsEnabled = HostAddress.IsEnabled = ServerPassword.IsEnabled = GamePath.IsEnabled = ReplayPath.IsEnabled = !running;
         if (Summary != null) Summary.Text = Contract.GuardRevision + " • Multiplayer " + Contract.Version + " • UDP 30502 • " + (running ? (serverReady ? "сервер работает" : "сервер запускается") : "сервер остановлен");
     }
