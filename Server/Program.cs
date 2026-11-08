@@ -44,9 +44,7 @@ try
     checkpoint.Apply(server);
     var endpoints = new List<IPEndPoint> { new(bind, Contract.Port) };
     if (!IPAddress.IsLoopback(bind)) endpoints.Add(new IPEndPoint(IPAddress.Loopback, Contract.Port));
-    if (!LiteNetManager.Create(server, endpoints.ToArray(), out var manager))
-    { manager.Stop(); throw new IOException("Не удалось занять UDP 30502. Проверь IP Radmin и другой запущенный сервер."); }
-    server.netManagers.Add(manager);
+    ServerListeners.Start(server, endpoints, Console.WriteLine);
     try { server.BulkDownloads = new BulkDownloadServer(endpoints, Console.WriteLine); Console.WriteLine("BULK TCP enabled on port " + Contract.Port); }
     catch (Exception error) { Console.WriteLine("BULK TCP unavailable; UDP remains active: " + error.Message); }
     // Preserve a healthy recovered backup instead of backing up corrupt primary bytes.

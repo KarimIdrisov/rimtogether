@@ -11,6 +11,7 @@ void Check(bool value, string message) { if (!value) throw new Exception("FAIL: 
 void Throws(Action action, string message) { try { action(); } catch { Check(true, message); return; } Check(false, message); }
 try
 {
+    if (args.Contains("--listeners-only")) { ListenerChecks.Run(Check); return 0; }
     GuardBinaryChecks.Run(Check);
     var state = Path.Combine(fixture, "state.json");
     Storage.Write(state, new { Value = 1 }); Storage.Write(state, new { Value = 2 });
@@ -93,6 +94,7 @@ try
     var unsafeRollback = Checkpoint.Capture(new MultiplayerServer(new ServerSettings()));
     Check(unsafeRollback.Tag != Contract.Tag, "guard checkpoint tag prevents old launcher from silently replaying guard commands");
     RecoveryChecks.Run(checkpoint, Check, Throws);
+    ListenerChecks.Run(Check);
     NetworkChecks.Run(checkpoint, Check);
     NetworkChecks.Run(checkpoint, Check, tcp: true);
     NetworkChecks.Run(checkpoint, Check, tcp: true, rejectTcp: true);
