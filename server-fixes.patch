@@ -1,6 +1,6 @@
 diff --git a/Source/Common/BulkDownloads.cs b/Source/Common/BulkDownloads.cs
 new file mode 100644
-index 0000000..414486c
+index 0000000..c6dcb25
 --- /dev/null
 +++ b/Source/Common/BulkDownloads.cs
 @@ -0,0 +1,140 @@
@@ -86,7 +86,7 @@ index 0000000..414486c
 +        try
 +        {
 +            client.NoDelay = true; client.ReceiveTimeout = 5000; client.SendTimeout = 5000;
-+            client.SendBufferSize = 1024 * 1024;
++            client.SendBufferSize = 4 * 1024 * 1024;
 +            using var stream = client.GetStream();
 +            var token = Encoding.ASCII.GetString(ReadExactly(stream, 64));
 +            Entry entry;
@@ -125,7 +125,7 @@ index 0000000..414486c
 +            throw new InvalidDataException("Invalid TCP offer");
 +        using var client = new TcpClient(AddressFamily.InterNetwork);
 +        using var cancelRegistration = cancellation.Register(() => client.Close());
-+        client.NoDelay = true; client.ReceiveTimeout = 5000; client.SendTimeout = 5000; client.ReceiveBufferSize = 1024 * 1024;
++        client.NoDelay = true; client.ReceiveTimeout = 5000; client.SendTimeout = 5000; client.ReceiveBufferSize = 4 * 1024 * 1024;
 +        var connect = client.ConnectAsync(endpoint.Address, endpoint.Port);
 +        if (!connect.Wait(2000)) throw new IOException("TCP connect timed out; UDP fallback requested");
 +        using var stream = client.GetStream();
