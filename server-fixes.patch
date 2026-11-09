@@ -259,7 +259,7 @@ index a1ca6a7..970c387 100644
  
      /// <summary>
 diff --git a/Source/Common/Networking/ConnectionBase.cs b/Source/Common/Networking/ConnectionBase.cs
-index 9499534..b66bf91 100644
+index 9499534..8c2eb65 100644
 --- a/Source/Common/Networking/ConnectionBase.cs
 +++ b/Source/Common/Networking/ConnectionBase.cs
 @@ -70,6 +70,8 @@ namespace Multiplayer.Common
@@ -271,7 +271,15 @@ index 9499534..b66bf91 100644
          // Max size of a packet that can be sent fragmented. It is not possible to send any packets larger than this.
          public const int MaxFragmentPacketTotalSize = 33_554_432;
  
-@@ -93,7 +95,7 @@ namespace Multiplayer.Common
+@@ -86,14 +88,14 @@ namespace Multiplayer.Common
+                 return;
+ 
+             // +1 for Send metadata's overhead
+-            if (message.Length + 1 <= MaxFragmentPacketSize)
++            if (message.Length + 1 <= FragmentPacketSize)
+             {
+                 Send(id, message);
+                 return;
              }
  
              // every packet has an additional 2 bytes of overhead

@@ -12,6 +12,7 @@ void Throws(Action action, string message) { try { action(); } catch { Check(tru
 try
 {
     if (args.Contains("--listeners-only")) { ListenerChecks.Run(Check); return 0; }
+    if (args.Contains("--framing-only")) { FramingChecks.Run(Check); return 0; }
     GuardBinaryChecks.Run(Check);
     var state = Path.Combine(fixture, "state.json");
     Storage.Write(state, new { Value = 1 }); Storage.Write(state, new { Value = 2 });
@@ -94,6 +95,7 @@ try
     var unsafeRollback = Checkpoint.Capture(new MultiplayerServer(new ServerSettings()));
     Check(unsafeRollback.Tag != Contract.Tag, "guard checkpoint tag prevents old launcher from silently replaying guard commands");
     RecoveryChecks.Run(checkpoint, Check, Throws);
+    FramingChecks.Run(Check);
     ListenerChecks.Run(Check);
     NetworkChecks.Run(checkpoint, Check);
     NetworkChecks.Run(checkpoint, Check, tcp: true);
