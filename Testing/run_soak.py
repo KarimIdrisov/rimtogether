@@ -82,7 +82,21 @@ def event(name, **values):
 def control(role, command):
     global control_id
     control_id += 1
-    (run/(role+'.control')).write_text(str(control_id)+'|'+command, encoding='utf-8')
+    target = run/(role+'.control')
+    temporary = run/(role+'.control.'+str(control_id)+'.tmp')
+    temporary.write_text(str(control_id)+'|'+command, encoding='utf-8')
+    # C# ReadAllText holds a brief Windows read-sharing lock. Never expose a
+    # partially written command; wait for that reader and atomically replace it.
+    try:
+        for attempt in range(40):
+            try:
+                os.replace(temporary,target)
+                return
+            except PermissionError:
+                if attempt == 39: raise
+                time.sleep(0.05)
+    finally:
+        temporary.unlink(missing_ok=True)
 def start_client(role):
     env = os.environ.copy(); env.update({'RIMTOGETHER_FAST_RESYNC':'1',
         'RIMTOGETHER_SOAK_ROOT':str(run),'RIMTOGETHER_SOAK_ROLE':role,

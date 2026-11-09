@@ -12,4 +12,6 @@ After the baseline interval, the guest alone changes a building's HP and the map
 
 `result.json`, client/server logs, fingerprint TSVs, the injected fault marker and native desync archive stay in the private test directory. Timing is sampled by a one-second controller and is approximate. The harness terminates only the processes it started and requests a clean server stop in `finally`.
 
+Control handoff writes a temporary file and atomically replaces the command file, retrying brief Windows read-sharing locks. The game never observes a partially written command.
+
 Two clients on one PC test real simulation and recovery but do not reproduce the remote player's hardware or the Radmin path. A passing finite soak is not a guarantee against every desync cause. The test-only assembly is excluded by the release archive's explicit allowlist.
