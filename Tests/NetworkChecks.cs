@@ -55,6 +55,9 @@ public static class NetworkChecks
             if (tcp && !rejectTcp && !lateTcp)
             { Until(() => second.PauseCommands > 0); check(true, "commands issued while TCP world is in flight are delivered after snapshot confirmation"); }
             check(first.IsHost && !second.IsHost, "server grants authority to actual host rather than a client role flag");
+            first.SendOpinion(900);
+            Until(() => second.LastSyncTick == 900);
+            check(first.LastSyncTick == -1, "dedicated host sync opinion reaches friend and is not echoed back to authority");
             var generation = server.worldData.SnapshotGeneration;
             server.Enqueue(() => server.worldData.TryStartJoinPointCreation(true));
             Until(() => server.worldData.SnapshotGeneration > generation);
@@ -84,7 +87,10 @@ public class Probe
     public int TcpOffers;
     public int TcpDownloads;
     public int PauseCommands;
+    public int LastSyncTick = -1;
     private LiteNetConnection? connection;
+    public void SendOpinion(int tick) => connection!.SendFragmented(new ClientSyncInfoPacket { SyncOpinion = new SyncOpinion
+    { startTick = tick, commandRandomStates = [], worldRandomStates = [], mapRandomStates = [], traceHashes = [], roundMode = RoundModeEnum.ToNearest } }.Serialize());
     public void RequestRejoin() => connection!.Send(Packets.Client_RequestRejoin);
     public Probe(string name, string password, Checkpoint checkpoint, bool rejectTcp, bool lateTcp, Action? during)
     {
@@ -94,7 +100,7 @@ public class Probe
             connection = new LiteNetConnection(peer) { username = name, Lenient = true };
             connection.ChangeState(new ProbeState(connection, password, host => IsHost = host,
                 () => { Authenticated = true; WorldTransfers++; }, checkpoint, rejectTcp, lateTcp,
-                accepted => { TcpOffers++; if (accepted) TcpDownloads++; }, during, () => PauseCommands++));
+                accepted => { TcpOffers++; if (accepted) TcpDownloads++; }, during, () => PauseCommands++, tick => LastSyncTick = tick));
         };
         listener.PeerDisconnectedEvent += (_, info) => { Reason = info.Reason; Disconnected = true; };
         listener.NetworkReceiveEvent += (_, reader, _, method) =>
@@ -104,10 +110,12 @@ public class Probe
     }
 }
 
-public class ProbeState(ConnectionBase connection, string password, Action<bool> authority, Action authenticated, Checkpoint checkpoint, bool rejectTcp, bool lateTcp, Action<bool> tcpResult, Action? during, Action pauseSeen) : AsyncConnectionState(connection)
+public class ProbeState(ConnectionBase connection, string password, Action<bool> authority, Action authenticated, Checkpoint checkpoint, bool rejectTcp, bool lateTcp, Action<bool> tcpResult, Action? during, Action pauseSeen, Action<int> syncSeen) : AsyncConnectionState(connection)
 {
     private bool host;
     private bool injected;
+    [TypedPacketHandler]
+    public void SyncInfo(ServerSyncInfoPacket packet) => syncSeen(packet.SyncOpinion.startTick);
     [PacketHandler(Packets.Server_PlayerList)]
     public void Players(ByteReader packet) => packet.Seek(packet.Length);
     [PacketHandler(Packets.Server_TimeControl)]

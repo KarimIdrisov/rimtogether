@@ -8,7 +8,19 @@ public static class RecoveryChecks
 {
     public static void Run(Checkpoint source, Action<bool, string> check, Action<Action, string> throws)
     {
-        check(MpVersion.Protocol == Contract.Protocol && Contract.Protocol == 5402, "guard client/server have an isolated matching protocol");
+        check(MpVersion.Protocol == Contract.Protocol && Contract.Protocol == 5403, "guard client/server require dedicated-host verification protocol");
+        var verification = new SyncVerificationWatchdog();
+        for (var i = 0; i < SyncVerificationWatchdog.MaxUnverifiedOpinions - 1; i++)
+            if (verification.ObserveLocal(true, false)) throw new Exception("Verification alarm before backlog limit");
+        check(true, "verification tolerates bounded network delay without a false alarm");
+        check(verification.ObserveLocal(true, false), "missing comparisons cannot silently discard an unlimited opinion backlog");
+        verification.Matched();
+        check(!verification.ObserveLocal(true, false), "successful comparison resets missing-verification budget");
+        for (var i = 0; i < 100; i++)
+            if (verification.ObserveLocal(false, false)) throw new Exception("Authority triggered watchdog");
+        for (var i = 0; i < 100; i++)
+            if (verification.ObserveLocal(true, true)) throw new Exception("Catch-up triggered watchdog");
+        check(true, "authority without arbiter and replay catch-up do not trigger missing-verification alarm");
         check(RecoveryPolicy.ShouldUpload(false, false, false, false, true), "dedicated host uploads fresh world snapshots");
         check(!RecoveryPolicy.ShouldUpload(false, false, false, false, false) && !RecoveryPolicy.ShouldUpload(true, false, false, false, true), "friend and replay simulation cannot publish authoritative world");
         var budget = new AutoRecoveryBudget();

@@ -18,7 +18,7 @@ Requires Git, .NET 9 SDK, Python 3 and Windows x64. Run `./BUILD.ps1 -Version 1.
 
 Every push to `main` runs GitHub Actions. Only after all checks pass does the publish job create release `v1.1.<run_number>`, including `RimTogether-win-x64.zip`, `RimTogether-manifest.json` and `RimTogether.Start.exe`. Failed builds never advance the update channel. Pull requests build and test without publishing.
 
-The current cohort targets RimWorld 1.6.4633 and Multiplayer 0.11.5 with `rt-guard1`, transport protocol **5402**, checkpoint schema 1. Guard 5401 command history remains compatible: RNG rules and command IDs did not change. Both players must restart through the launcher after upgrading. [Guard behavior](DESYNC-GUARD.md), [transfer measurements and TCP/UDP fallback](TRANSFER-PERFORMANCE.md). A future upstream upgrade must verify the client/server pair and checkpoint compatibility together.
+The current cohort targets RimWorld 1.6.4633 and Multiplayer 0.11.5 with `rt-guard2`, protocol **5403**, checkpoint schema 1. Guard 5401/5402 command history remains compatible: RNG rules and command IDs did not change. Guard2 fixes dedicated-host sync opinion publication and stops unverified simulation after a bounded comparison backlog. Both players must update and create a new invitation. [Guard behavior](DESYNC-GUARD.md), [transfer measurements and TCP/UDP fallback](TRANSFER-PERFORMANCE.md). A future upstream upgrade must verify the client/server pair and checkpoint compatibility together.
 
 ## Limits
 

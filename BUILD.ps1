@@ -46,7 +46,7 @@ foreach ($pair in @(
     Copy-Item -LiteralPath (Join-Path $upstream $pair[0]) -Destination $target -Force
     $guardFiles[$pair[1]] = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
 }
-@{ Revision='rt-guard1'; Protocol=5402; Files=$guardFiles } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $guardRoot 'manifest.json') -Encoding utf8NoBOM
+@{ Revision='rt-guard2'; Protocol=5403; Files=$guardFiles } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $guardRoot 'manifest.json') -Encoding utf8NoBOM
 $previousExport = $env:RIMTOGETHER_TEST_REPLAY
 $previousGuardPayload = $env:RIMTOGETHER_GUARD_PAYLOAD
 try {

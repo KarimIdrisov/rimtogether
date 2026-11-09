@@ -31,6 +31,33 @@ index 7db59bb..2515c0c 100644
      }
  
      public void SetTimeEverywhere(TimeSpeed speed)
+diff --git a/Source/Client/ConstantTicker.cs b/Source/Client/ConstantTicker.cs
+index aa3bbb4..7996aa9 100644
+--- a/Source/Client/ConstantTicker.cs
++++ b/Source/Client/ConstantTicker.cs
+@@ -84,9 +84,13 @@ namespace Multiplayer.Client
+ 
+                 try
+                 {
+-                    if (!TickPatch.Simulating && (Multiplayer.LocalServer != null || Multiplayer.arbiterInstance))
++                    if (RecoveryPolicy.ShouldUpload(TickPatch.Simulating, Multiplayer.IsReplay,
++                            Multiplayer.LocalServer != null, Multiplayer.arbiterInstance, Multiplayer.session.isHost))
++                    {
+                         Multiplayer.Client.SendFragmented(
+                             new ClientSyncInfoPacket { SyncOpinion = opinion.ToNet() }.Serialize());
++                        sync.NotePublishedOpinion(opinion.startTick);
++                    }
+                 }
+                 catch (Exception e)
+                 {
+@@ -94,6 +98,7 @@ namespace Multiplayer.Client
+                 }
+ 
+                 sync.AddClientOpinionAndCheckDesync(opinion);
++                sync.CheckVerificationProgress();
+             }
+         }
+ 
 diff --git a/Source/Client/Desyncs/SaveableDesyncInfo.cs b/Source/Client/Desyncs/SaveableDesyncInfo.cs
 index 200c3df..12372c9 100644
 --- a/Source/Client/Desyncs/SaveableDesyncInfo.cs
@@ -132,15 +159,62 @@ index 200c3df..12372c9 100644
          }
          catch (Exception e)
          {
+diff --git a/Source/Client/Desyncs/SyncCoordinator.cs b/Source/Client/Desyncs/SyncCoordinator.cs
+index 0714065..c28598f 100644
+--- a/Source/Client/Desyncs/SyncCoordinator.cs
++++ b/Source/Client/Desyncs/SyncCoordinator.cs
+@@ -30,6 +30,32 @@ namespace Multiplayer.Client
+         public bool arbiterWasPlayingOnLastValidTick;
+ 
+         private const int MaxBacklog = 30;
++        private readonly SyncVerificationWatchdog verification = new();
++        private int publishedOpinions;
++        private int matchedOpinions;
++
++        public void NotePublishedOpinion(int tick)
++        {
++            if (publishedOpinions++ % 120 == 0)
++                Log.Message($"RimTogether SYNC published authority opinion tick={tick}");
++        }
++
++        public void CheckVerificationProgress()
++        {
++            var requiresComparison = !Multiplayer.arbiterInstance &&
++                (Multiplayer.session.ArbiterPlaying || !(Multiplayer.session.isHost || Multiplayer.LocalServer != null));
++            if (Multiplayer.session.desynced || !verification.ObserveLocal(requiresComparison, TickPatch.Simulating)) return;
++            Multiplayer.session.desynced = true;
++            TickPatch.ClearSimulating();
++            const string reason = "RimTogether: проверка синхронизации потеряна. Мир остановлен: контрольные данные хоста не сопоставляются с локальными данными. Нужна повторная синхронизация.";
++            Log.Error($"{reason} Last verified tick={lastValidTick}, local tick={TickPatch.Timer}");
++            OnMainThread.Enqueue(() =>
++            {
++                MpUI.ClearWindowStack();
++                Find.WindowStack.Add(new SyncVerificationWindow(reason));
++                Multiplayer.Client.Send(new ClientDesyncedPacket(TickPatch.Timer, -1));
++            });
++        }
+ 
+         public ClientSyncOpinion FinishLocalOpinion()
+         {
+@@ -100,6 +126,9 @@ namespace Multiplayer.Client
+             {
+                 // Update fields
+                 lastValidTick = oldOpinion.startTick;
++                verification.Matched();
++                if (matchedOpinions++ % 120 == 0)
++                    Log.Message($"RimTogether SYNC verified tick={lastValidTick}");
+                 arbiterWasPlayingOnLastValidTick = Multiplayer.session.ArbiterPlaying;
+ 
+                 // Return inner data to the pool
 diff --git a/Source/Client/MultiplayerStatic.cs b/Source/Client/MultiplayerStatic.cs
-index 49519f9..6f2d1e0 100644
+index 49519f9..df680ea 100644
 --- a/Source/Client/MultiplayerStatic.cs
 +++ b/Source/Client/MultiplayerStatic.cs
 @@ -75,6 +75,7 @@ namespace Multiplayer.Client
              }
  
              Log.Message($"Multiplayer version {MpVersion.Version}");
-+            Log.Message("RimTogether Guard rt-guard1 active; protocol " + MpVersion.Protocol + "; RNG and recovery guards enabled.");
++            Log.Message("RimTogether Guard rt-guard2 active; protocol " + MpVersion.Protocol + "; dedicated-host sync verification and watchdog enabled.");
              Log.Message($"Arch: {RuntimeInformation.ProcessArchitecture}/OS: {RuntimeInformation.OSArchitecture}");
              Log.Message($"Player's username: {Multiplayer.username}");
  
@@ -665,3 +739,36 @@ index addc12e..2dfa7be 100644
          }
      }
  
+diff --git a/Source/Client/Windows/SyncVerificationWindow.cs b/Source/Client/Windows/SyncVerificationWindow.cs
+new file mode 100644
+index 0000000..90fecf3
+--- /dev/null
++++ b/Source/Client/Windows/SyncVerificationWindow.cs
+@@ -0,0 +1,27 @@
++using UnityEngine;
++using Verse;
++
++namespace Multiplayer.Client;
++
++public sealed class SyncVerificationWindow : Window
++{
++    private readonly string reason;
++    public override Vector2 InitialSize => new(660, 205);
++
++    public SyncVerificationWindow(string reason)
++    {
++        this.reason = reason;
++        closeOnClickedOutside = closeOnAccept = closeOnCancel = false;
++        absorbInputAroundWindow = true;
++        layer = WindowLayer.Super;
++    }
++
++    public override void DoWindowContents(Rect rect)
++    {
++        Widgets.Label(new Rect(0, 0, rect.width, 105), reason);
++        if (Widgets.ButtonText(new Rect(0, 115, 300, 35), "Повторить синхронизацию"))
++            Rejoiner.DoRejoin();
++        if (Widgets.ButtonText(new Rect(315, 115, 280, 35), "Выйти в меню"))
++            MainMenuPatch.AskQuitToMainMenu();
++    }
++}

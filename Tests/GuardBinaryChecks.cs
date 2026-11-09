@@ -1,5 +1,6 @@
 using System.Reflection.Metadata;
 using System.Reflection.PortableExecutable;
+using System.Reflection.Metadata.Ecma335;
 
 namespace RimTogether;
 
@@ -22,6 +23,24 @@ public static class GuardBinaryChecks
         check(reader.TypeReferences.Any(t => reader.GetString(reader.GetTypeReference(t).Name) == "QuestNode_ResolveQuestName"), "quest-name RNG guard is present in packaged client");
         var move = reader.TypeDefinitions.Select(reader.GetTypeDefinition).Single(t => reader.GetString(t.Name) == "DraftedMove_GotoFeedbackPatch");
         check(move.GetMethods().Any(m => reader.GetString(reader.GetMethodDefinition(m).Name) == "CustomEndCurrentJob"), "packaged client contains synchronized drafted-move stop operation");
+        bool Calls(string typeName, string methodName, string targetType, string targetMethod)
+        {
+            var type = reader.TypeDefinitions.Select(reader.GetTypeDefinition).Single(t => reader.GetString(t.Name) == typeName);
+            var method = type.GetMethods().Select(reader.GetMethodDefinition).Single(m => reader.GetString(m.Name) == methodName);
+            var code = client.GetMethodBody(method.RelativeVirtualAddress).GetILBytes()!;
+            for (var i = 0; i + 4 < code.Length; i++)
+            {
+                if (code[i] != 0x28 && code[i] != 0x6f) continue; // call / callvirt
+                var token = BitConverter.ToInt32(code, i + 1);
+                if ((token & unchecked((int)0xff000000)) != 0x0a000000) continue;
+                var member = reader.GetMemberReference(MetadataTokens.MemberReferenceHandle(token & 0xffffff));
+                if (member.Parent.Kind == HandleKind.TypeReference && reader.GetString(member.Name) == targetMethod &&
+                    reader.GetString(reader.GetTypeReference((TypeReferenceHandle)member.Parent).Name) == targetType) return true;
+            }
+            return false;
+        }
+        check(Calls("ConstantTicker", "TickSyncCoordinator", "RecoveryPolicy", "ShouldUpload"), "compiled ticker uses dedicated-host authority policy for sync opinion publication");
+        check(types.Contains("SyncVerificationWindow") && Calls("SyncCoordinator", "CheckVerificationProgress", "SyncVerificationWatchdog", "ObserveLocal"), "compiled client stops unverified simulation instead of silently dropping comparisons");
         if (Environment.GetEnvironmentVariable("RIMTOGETHER_GAME_MANAGED") is not { Length: > 0 } gameManaged) return;
         using var game = new PEReader(File.OpenRead(Path.Combine(gameManaged, "Assembly-CSharp.dll")));
         var definitions = game.GetMetadataReader();

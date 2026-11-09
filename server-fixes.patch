@@ -500,7 +500,7 @@ index 7663880..361acde 100644
      }
  }
 diff --git a/Source/Common/Networking/State/ServerPlayingState.cs b/Source/Common/Networking/State/ServerPlayingState.cs
-index c6d22e2..0a1e88b 100644
+index c6d22e2..8dc7140 100644
 --- a/Source/Common/Networking/State/ServerPlayingState.cs
 +++ b/Source/Common/Networking/State/ServerPlayingState.cs
 @@ -6,15 +6,20 @@ namespace Multiplayer.Common
@@ -572,6 +572,15 @@ index c6d22e2..0a1e88b 100644
  
              var idMatched = Player.keepAliveId == packet.id;
              connection.OnKeepAliveArrived(idMatched);
+@@ -145,6 +155,8 @@ namespace Multiplayer.Common
+             if (arbiter ? !Player.IsArbiter : !Player.IsHost) return; // policy
+ 
+             // Keep at most 10 sync infos
++            if (Server.worldData.syncInfos.Count == 0)
++                ServerLog.Log($"SYNC authority {Player.Username}: first opinion tick={packet.SyncOpinion.startTick}");
+             Server.worldData.syncInfos.Add(packet.rawSyncOpinion);
+             if (Server.worldData.syncInfos.Count > 10)
+                 Server.worldData.syncInfos.RemoveAt(0);
 diff --git a/Source/Common/PlayerManager.cs b/Source/Common/PlayerManager.cs
 index cc3da92..5e46c50 100644
 --- a/Source/Common/PlayerManager.cs
@@ -708,8 +717,31 @@ index 0000000..7819f0f
 +        if ((uint)total != expected || !allowEmpty && total == 0) throw new InvalidDataException("Incomplete compressed snapshot footer");
 +    }
 +}
+diff --git a/Source/Common/SyncVerificationWatchdog.cs b/Source/Common/SyncVerificationWatchdog.cs
+new file mode 100644
+index 0000000..ac3cc06
+--- /dev/null
++++ b/Source/Common/SyncVerificationWatchdog.cs
+@@ -0,0 +1,17 @@
++namespace Multiplayer.Common;
++
++// Counts completed local opinion windows, not wall time: loading and a paused simulation
++// cannot trip the watchdog simply because no simulation data is being produced.
++public sealed class SyncVerificationWatchdog
++{
++    public const int MaxUnverifiedOpinions = 30;
++    private int unverified;
++
++    public void Matched() => unverified = 0;
++
++    public bool ObserveLocal(bool comparisonRequired, bool simulating)
++    {
++        if (!comparisonRequired || simulating) { unverified = 0; return false; }
++        return ++unverified >= MaxUnverifiedOpinions;
++    }
++}
 diff --git a/Source/Common/Version.cs b/Source/Common/Version.cs
-index be9f185..4e851d4 100644
+index be9f185..c8477fd 100644
 --- a/Source/Common/Version.cs
 +++ b/Source/Common/Version.cs
 @@ -6,13 +6,13 @@ namespace Multiplayer.Common
@@ -717,14 +749,14 @@ index be9f185..4e851d4 100644
      {
          public const string SimpleVersion = "0.11.5";
 -        public const int Protocol = 54;
-+        public const int Protocol = 5402; // Guard: numbered snapshots plus authenticated TCP bulk download.
++        public const int Protocol = 5403; // Guard2: dedicated-host sync opinions and verification watchdog required.
  
          public static readonly string? GitHash = Assembly.GetExecutingAssembly()
              .GetCustomAttributes<AssemblyMetadataAttribute>()
              .FirstOrDefault(attr => attr.Key == "GitHash")?.Value;
  
 -        public static readonly string Version = SimpleVersion + (GitHash != null ? $"+{GitHash}" : "");
-+        public static readonly string Version = SimpleVersion + "-rt-guard1" + (GitHash != null ? $"+{GitHash}" : "");
++        public static readonly string Version = SimpleVersion + "-rt-guard2" + (GitHash != null ? $"+{GitHash}" : "");
  
          public static readonly string? GitDescription = Assembly.GetExecutingAssembly()
              .GetCustomAttributes<AssemblyMetadataAttribute>()

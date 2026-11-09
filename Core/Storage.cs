@@ -45,8 +45,8 @@ public static class Contract
     // A single cohort prevents a client updating beyond the bundled server protocol.
     public const string Tag = "v0.11.5";
     public const string Version = "0.11.5";
-    public const int Protocol = 5402;
-    public const string GuardRevision = "rt-guard1";
+    public const int Protocol = 5403;
+    public const string GuardRevision = "rt-guard2";
     public const int Port = 30502;
     public static string DataRoot => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RimTogether");
     public static string GameData => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
