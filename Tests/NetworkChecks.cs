@@ -64,6 +64,7 @@ public static class NetworkChecks
             check(!server.worldData.CreatingJoinPoint, "dedicated snapshot request completes through numbered owner upload over UDP");
             var transfers = second.WorldTransfers;
             second.RequestRejoin(); Until(() => second.WorldTransfers > transfers);
+            check(!second.Disconnected, "late frame-time and freeze telemetry cannot disconnect a rejoining client");
             check(second.WorldTransfers == transfers + 1, "friend reloads newest world over existing UDP connection without reconnecting server");
             var third = Connect("Third", "test-password"); Until(() => third.Disconnected);
             check(!third.Authenticated && third.Reason == DisconnectReason.ConnectionRejected, "third client explicitly rejected by two-player limit");
@@ -91,7 +92,12 @@ public class Probe
     private LiteNetConnection? connection;
     public void SendOpinion(int tick) => connection!.SendFragmented(new ClientSyncInfoPacket { SyncOpinion = new SyncOpinion
     { startTick = tick, commandRandomStates = [], worldRandomStates = [], mapRandomStates = [], traceHashes = [], roundMode = RoundModeEnum.ToNearest } }.Serialize());
-    public void RequestRejoin() => connection!.Send(Packets.Client_RequestRejoin);
+    public void RequestRejoin()
+    {
+        connection!.Send(Packets.Client_RequestRejoin);
+        connection.Send(new ClientFrameTimePacket(17));
+        connection.Send(ClientFreezePacket.Unfreeze());
+    }
     public Probe(string name, string password, Checkpoint checkpoint, bool rejectTcp, bool lateTcp, Action? during)
     {
         var listener = new EventBasedNetListener();

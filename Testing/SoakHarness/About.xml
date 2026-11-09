@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ModMetaData><name>RimTogether isolated soak test ONLY</name><author>RimTogether tests</author><packageId>rimtogether.soakharness</packageId><supportedVersions><li>1.6</li></supportedVersions><loadAfter><li>rwmt.multiplayer</li></loadAfter><description>Test-only fault injection. Never include in a player release.</description></ModMetaData>

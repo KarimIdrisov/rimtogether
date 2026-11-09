@@ -40,6 +40,7 @@ public static class GuardBinaryChecks
             return false;
         }
         check(Calls("ConstantTicker", "TickSyncCoordinator", "RecoveryPolicy", "ShouldUpload"), "compiled ticker uses dedicated-host authority policy for sync opinion publication");
+        check(Calls("TickPatch", "Prefix", "RecoveryPolicy", "CanTickSimulation"), "compiled client blocks old-world ticking during rejoin loading");
         check(types.Contains("SyncVerificationWindow") && Calls("SyncCoordinator", "CheckVerificationProgress", "SyncVerificationWatchdog", "ObserveLocal"), "compiled client stops unverified simulation instead of silently dropping comparisons");
         if (Environment.GetEnvironmentVariable("RIMTOGETHER_GAME_MANAGED") is not { Length: > 0 } gameManaged) return;
         using var game = new PEReader(File.OpenRead(Path.Combine(gameManaged, "Assembly-CSharp.dll")));

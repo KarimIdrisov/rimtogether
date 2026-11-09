@@ -394,10 +394,10 @@ index ebf0895..a9f432e 100644
              mpVersion = MpVersion.Version,
              defStatus = defStatus,
 diff --git a/Source/Common/Networking/State/ServerLoadingState.cs b/Source/Common/Networking/State/ServerLoadingState.cs
-index 7663880..361acde 100644
+index 7663880..bfe4c74 100644
 --- a/Source/Common/Networking/State/ServerLoadingState.cs
 +++ b/Source/Common/Networking/State/ServerLoadingState.cs
-@@ -1,11 +1,34 @@
+@@ -1,11 +1,44 @@
  ﻿using System.Collections.Generic;
  using System.Threading.Tasks;
 +using System;
@@ -412,6 +412,16 @@ index 7663880..361acde 100644
 +    public bool SnapshotCaptured { get; private set; }
 +    private readonly List<ServerCommandPacket> pendingCommands = new();
 +    private bool readyAfterTcp;
++    // Telemetry can cross the Playing -> Loading transition during a rejoin,
++    // or arrive once the client has accepted the world but TCP completion is pending.
++    [TypedPacketHandler]
++    public void HandleFrameTime(ClientFrameTimePacket packet) => Player.frameTime = packet.frameTime;
++    [TypedPacketHandler]
++    public void HandleFreeze(ClientFreezePacket packet)
++    {
++        Player.frozen = packet.freeze;
++        if (!packet.freeze) Player.unfrozenAt = Server.NetTimer;
++    }
 +    [PacketHandler(Packets.Client_WorldReady)]
 +    public void HandleEarlyWorldReady(ByteReader data)
 +    {
@@ -432,7 +442,7 @@ index 7663880..361acde 100644
      public ServerLoadingState(ConnectionBase connection) : base(connection)
      {
      }
-@@ -19,7 +42,7 @@ public class ServerLoadingState : AsyncConnectionState
+@@ -19,7 +52,7 @@ public class ServerLoadingState : AsyncConnectionState
          Player.keepAliveAt = Server.NetTimer;
  
          if (Player.IsHost)
@@ -441,7 +451,7 @@ index 7663880..361acde 100644
  
          var idMatched = Player.keepAliveId == packet.id;
          connection.OnKeepAliveArrived(idMatched);
-@@ -32,15 +55,51 @@ public class ServerLoadingState : AsyncConnectionState
+@@ -32,15 +65,51 @@ public class ServerLoadingState : AsyncConnectionState
          await Server.worldData.WaitJoinPoint();
          await EndIfDead();
  
@@ -496,7 +506,7 @@ index 7663880..361acde 100644
  
          ByteWriter writer = new ByteWriter();
  
-@@ -83,9 +142,6 @@ public class ServerLoadingState : AsyncConnectionState
+@@ -83,9 +152,6 @@ public class ServerLoadingState : AsyncConnectionState
          foreach (var syncInfo in Server.worldData.syncInfos)
              writer.WritePrefixedBytes(syncInfo);
  
@@ -653,15 +663,18 @@ index cc3da92..5e46c50 100644
  
 diff --git a/Source/Common/RecoveryPolicy.cs b/Source/Common/RecoveryPolicy.cs
 new file mode 100644
-index 0000000..f350c64
+index 0000000..0fc3219
 --- /dev/null
 +++ b/Source/Common/RecoveryPolicy.cs
-@@ -0,0 +1,21 @@
+@@ -0,0 +1,24 @@
 +namespace Multiplayer.Common;
 +
 +// Pure policy shared by the client and regression tests. No simulation state is repaired here.
 +public static class RecoveryPolicy
 +{
++    public static bool CanTickSimulation(bool replay, ConnectionStateEnum state) =>
++        replay || state == ConnectionStateEnum.ClientPlaying;
++
 +    public static bool ShouldUpload(bool simulating, bool replay, bool localServer, bool arbiter, bool dedicatedHost) =>
 +        !simulating && !replay && (localServer || arbiter || dedicatedHost);
 +}

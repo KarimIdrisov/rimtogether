@@ -9,6 +9,10 @@ public static class RecoveryChecks
     public static void Run(Checkpoint source, Action<bool, string> check, Action<Action, string> throws)
     {
         check(MpVersion.Protocol == Contract.Protocol && Contract.Protocol == 5403, "guard client/server require dedicated-host verification protocol");
+        check(!RecoveryPolicy.CanTickSimulation(false, ConnectionStateEnum.ClientLoading) &&
+            !RecoveryPolicy.CanTickSimulation(false, ConnectionStateEnum.ClientJoining) &&
+            RecoveryPolicy.CanTickSimulation(false, ConnectionStateEnum.ClientPlaying) &&
+            RecoveryPolicy.CanTickSimulation(true, ConnectionStateEnum.ClientLoading), "rejoin cannot tick old world while connection is loading; active play and replay remain supported");
         var verification = new SyncVerificationWatchdog();
         for (var i = 0; i < SyncVerificationWatchdog.MaxUnverifiedOpinions - 1; i++)
             if (verification.ObserveLocal(true, false)) throw new Exception("Verification alarm before backlog limit");

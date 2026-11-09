@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><TargetFramework>net48</TargetFramework><LangVersion>12</LangVersion><Nullable>enable</Nullable><AssemblyName>RimTogether.SoakHarness</AssemblyName><GuardRoot Condition="'$(GuardRoot)' == ''">../../.build/guard</GuardRoot></PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Krafs.Rimworld.Ref" Version="1.6.4566" />
+    <PackageReference Include="Lib.Harmony" Version="2.4.1" ExcludeAssets="runtime" />
+    <Reference Include="Multiplayer"><HintPath>$(GuardRoot)/1.6/AssembliesCustom/Multiplayer.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="MultiplayerCommon"><HintPath>$(GuardRoot)/1.6/AssembliesCustom/MultiplayerCommon.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+</Project>

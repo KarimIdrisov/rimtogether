@@ -519,6 +519,20 @@ index 373af28..98de49d 100644
 +    }
 +
  }
+diff --git a/Source/Client/Patches/TickPatch.cs b/Source/Client/Patches/TickPatch.cs
+index 9c41c43..a252f63 100644
+--- a/Source/Client/Patches/TickPatch.cs
++++ b/Source/Client/Patches/TickPatch.cs
+@@ -64,6 +64,9 @@ namespace Multiplayer.Client
+         static bool Prefix()
+         {
+             if (Multiplayer.Client == null) return true;
++            // Rejoin changes connection state before its queued world cleanup executes.
++            // Never tick the old world or emit frame telemetry during that interval.
++            if (!RecoveryPolicy.CanTickSimulation(Multiplayer.IsReplay, Multiplayer.Client.State)) return false;
+             if (!ShouldHandle) return false;
+             if (Frozen) return false;
+ 
 diff --git a/Source/Client/Saving/Loader.cs b/Source/Client/Saving/Loader.cs
 index 74e5c00..c896144 100644
 --- a/Source/Client/Saving/Loader.cs
