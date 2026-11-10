@@ -5,7 +5,7 @@ Only .build/soak-* data/config directories are used. The extra fault-injection m
 is deployed exclusively inside .build/unity-game and is not part of release bundles.
 """
 import argparse, datetime as dt, hashlib, json, os, pathlib, shutil, subprocess
-import threading, time, xml.etree.ElementTree as ET
+import threading, time, sys, xml.etree.ElementTree as ET
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--before-seconds', type=int, default=600)
