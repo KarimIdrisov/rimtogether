@@ -1,6 +1,7 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '1.1.0',
-    [string]$Destination = (Join-Path $PSScriptRoot 'dist')
+    [string]$Destination = (Join-Path $PSScriptRoot 'dist'),
+    [switch]$SkipTests
 )
 $ErrorActionPreference = 'Stop'
 $sourceRoot = $PSScriptRoot
@@ -30,8 +31,10 @@ if (-not (Test-Path -LiteralPath $archive) -or (Get-FileHash -LiteralPath $archi
     Invoke-WebRequest 'https://github.com/rwmt/Multiplayer/releases/download/v0.11.5/Multiplayer-v0.11.5.zip' -OutFile $archive
 }
 if ((Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $expectedHash) { throw 'Archive checksum mismatch' }
-dotnet test (Join-Path $upstream 'Source/Tests/Tests.csproj') -c Release --nologo -v minimal --logger 'console;verbosity=normal' --logger 'trx;LogFileName=upstream.trx' --results-directory (Join-Path $cache 'test-results')
-if ($LASTEXITCODE -ne 0) { throw 'Upstream regression tests failed' }
+if (-not $SkipTests) {
+    dotnet test (Join-Path $upstream 'Source/Tests/Tests.csproj') -c Release --nologo -v minimal --logger 'console;verbosity=normal' --logger 'trx;LogFileName=upstream.trx' --results-directory (Join-Path $cache 'test-results')
+    if ($LASTEXITCODE -ne 0) { throw 'Upstream regression tests failed' }
+}
 dotnet build (Join-Path $upstream 'Source/Client/Multiplayer.csproj') -c Release
 if ($LASTEXITCODE -ne 0) { throw 'Guard client build failed' }
 $guardRoot = Join-Path $cache 'guard'
@@ -52,8 +55,10 @@ $previousGuardPayload = $env:RIMTOGETHER_GUARD_PAYLOAD
 try {
     $env:RIMTOGETHER_TEST_REPLAY = Join-Path $cache 'synthetic-replay.zip'
     $env:RIMTOGETHER_GUARD_PAYLOAD = $guardRoot
-    dotnet run --project (Join-Path $sourceRoot 'Tests/Tests.csproj') -c Release -- $archive
-    if ($LASTEXITCODE -ne 0) { throw 'Regression tests failed' }
+    if (-not $SkipTests) {
+        dotnet run --project (Join-Path $sourceRoot 'Tests/Tests.csproj') -c Release -- $archive
+        if ($LASTEXITCODE -ne 0) { throw 'Regression tests failed' }
+    }
 } finally { $env:RIMTOGETHER_TEST_REPLAY = $previousExport; $env:RIMTOGETHER_GUARD_PAYLOAD = $previousGuardPayload }
 $destinationFull = [IO.Path]::GetFullPath($Destination)
 foreach ($project in @('Launcher', 'Server', 'Bootstrap')) {
@@ -64,8 +69,10 @@ foreach ($project in @('Launcher', 'Server', 'Bootstrap')) {
 $previousIntegration = $env:RIMTOGETHER_INTEGRATION_DIR
 try {
     $env:RIMTOGETHER_INTEGRATION_DIR = Join-Path $cache 'process-test-transport2'
-    python (Join-Path $sourceRoot 'integration.py') (Join-Path $cache 'synthetic-replay.zip') (Join-Path $destinationFull 'server/RimTogether.Server.exe')
-    if ($LASTEXITCODE -ne 0) { throw 'Standalone process integration tests failed' }
+    if (-not $SkipTests) {
+        python (Join-Path $sourceRoot 'integration.py') (Join-Path $cache 'synthetic-replay.zip') (Join-Path $destinationFull 'server/RimTogether.Server.exe')
+        if ($LASTEXITCODE -ne 0) { throw 'Standalone process integration tests failed' }
+    }
 } finally { $env:RIMTOGETHER_INTEGRATION_DIR = $previousIntegration }
 $packages = Join-Path $destinationFull 'packages'
 New-Item -ItemType Directory -Path $packages -Force | Out-Null

@@ -4,15 +4,22 @@ using RimTogether;
 
 // The server uses pinned Common v0.11.5 plus the paired RimTogether Guard patches.
 // This host adds durable checkpoints, a bounded two-player configuration and clean shutdown.
-if (args.Length != 1) { Console.Error.WriteLine("Usage: RimTogether.Server.exe <server-config.json>"); return 2; }
+if (args.Length != 1 && !(args.Length == 2 && args[1] == "--prepare")) { Console.Error.WriteLine("Usage: RimTogether.Server.exe <server-config.json> [--prepare]"); return 2; }
 try
 {
     var configPath = Path.GetFullPath(args[0]);
     var config = Storage.Read<Settings>(configPath);
-    var directory = Path.Combine(Path.GetDirectoryName(configPath)!, "world");
+    if (config.WorldSlot.Length != 0 && !Guid.TryParseExact(config.WorldSlot, "N", out _)) throw new InvalidDataException("Некорректный слот мира.");
+    var directory = config.WorldSlot.Length == 0
+        ? Path.Combine(Path.GetDirectoryName(configPath)!, "world")
+        : Path.Combine(Path.GetDirectoryName(configPath)!, "worlds", config.WorldSlot);
     Directory.CreateDirectory(directory);
     using var exclusive = new FileStream(Path.Combine(directory, "server.lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
     var stateFile = Path.Combine(directory, "checkpoint.json");
+    if (args.Length == 2 && (File.Exists(stateFile) || File.Exists(stateFile + ".bak")))
+        throw new InvalidOperationException("Для импорта нужен новый слот. Существующий мир не перезаписывается.");
+    if (args.Length == 1 && config.WorldSlot.Length != 0 && !File.Exists(stateFile) && !File.Exists(stateFile + ".bak"))
+        throw new FileNotFoundException("Слот мира отсутствует. Восстанови checkpoint или явно загрузи выбранный сейв заново.");
     Checkpoint? checkpoint = null;
     if (File.Exists(stateFile) || File.Exists(stateFile + ".bak"))
     {
@@ -24,6 +31,13 @@ try
         if (checkpoint == null) throw new InvalidDataException("Контрольные точки не удалось безопасно загрузить. Причина указана выше; несовместимые или повреждённые данные не перезаписываются.");
     }
     else checkpoint = Checkpoint.FromReplay(config.SeedReplay);
+    if (args.Length == 2)
+    {
+        Storage.Write(stateFile, checkpoint, keepRawBackup: false);
+        Storage.Write(Path.Combine(directory, "source.json"), new { Replay = config.SeedReplay, ImportedUtc = DateTime.UtcNow, checkpoint.Tick }, keepRawBackup: false);
+        Console.WriteLine("SAVE PREPARED: " + Path.GetFileName(config.SeedReplay) + " tick=" + checkpoint.Tick + " slot=" + config.WorldSlot);
+        return 0;
+    }
     if (checkpoint.ClientProtocol != Contract.Protocol)
     {
         var backup = Path.Combine(directory, "checkpoint.before-protocol-" + checkpoint.ClientProtocol + ".json");

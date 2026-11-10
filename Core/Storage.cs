@@ -33,6 +33,7 @@ public class Settings
     public string HostAddress { get; set; } = "127.0.0.1";
     public string Password { get; set; } = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(6));
     public string SeedReplay { get; set; } = "";
+    public string WorldSlot { get; set; } = "";
     public bool IsHost { get; set; } = true;
     public bool AutoUpdate { get; set; } = true;
     public string LastFingerprint { get; set; } = "";

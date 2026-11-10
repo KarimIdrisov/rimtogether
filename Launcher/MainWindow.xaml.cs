@@ -65,7 +65,7 @@ public partial class MainWindow : Window
         if (ServerPassword.Password.Length < 6) throw new InvalidOperationException("Пароль должен содержать минимум 6 символов.");
         var result = new Settings { IsHost = Role.SelectedIndex == 0, GamePath = GamePath.Text.Trim(), Username = Username.Text.Trim(),
             HostAddress = ip.ToString(), Password = ServerPassword.Password, SeedReplay = ReplayPath.Text.Trim(), AutoUpdate = AutoUpdate.IsChecked == true,
-            LastFingerprint = settings.LastFingerprint, ExpectedFingerprint = settings.ExpectedFingerprint, FastRecovery = FastRecovery.IsChecked == true };
+            LastFingerprint = settings.LastFingerprint, ExpectedFingerprint = settings.ExpectedFingerprint, FastRecovery = FastRecovery.IsChecked == true, WorldSlot = settings.WorldSlot };
         Storage.Write(SettingsPath, result); settings = result; return result;
     }
     private async Task Run(Func<Task> action)
@@ -173,6 +173,35 @@ public partial class MainWindow : Window
     });
     private void BrowseGame_Click(object sender, RoutedEventArgs e) { var dialog = new OpenFileDialog { Filter = "RimWorld|RimWorldWin64.exe" }; if (dialog.ShowDialog() == true) GamePath.Text = Path.GetDirectoryName(dialog.FileName)!; }
     private void BrowseReplay_Click(object sender, RoutedEventArgs e) { var dialog = new OpenFileDialog { Filter = "Multiplayer save|*.zip", InitialDirectory = Path.Combine(Contract.GameData, "MpReplays") }; if (dialog.ShowDialog() == true) ReplayPath.Text = dialog.FileName; }
+
+    private async void LoadSelectedSave_Click(object sender, RoutedEventArgs e) => await Run(async () =>
+    {
+        var config = JsonSerializer.Deserialize<Settings>(JsonSerializer.Serialize(ReadForm(), Storage.Json), Storage.Json)!;
+        if (!config.IsHost) throw new InvalidOperationException("Сейв выбирает хост.");
+        if (!File.Exists(config.SeedReplay)) throw new FileNotFoundException("Выбери существующий MP ZIP.");
+        if (Process.GetProcessesByName("RimWorldWin64").Length != 0) throw new InvalidOperationException("Сначала закрой RimWorld.");
+        await StopServer();
+        var previousSlot = config.WorldSlot;
+        config.WorldSlot = Guid.NewGuid().ToString("N");
+        var serverDir = Path.Combine(root, "server"); Directory.CreateDirectory(serverDir);
+        var request = Path.Combine(serverDir, "import-" + config.WorldSlot + ".json");
+        try
+        {
+            Storage.Write(request, config);
+            var start = new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "server", "RimTogether.Server.exe"))
+                { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+            start.ArgumentList.Add(request); start.ArgumentList.Add("--prepare");
+            using var importer = Process.Start(start) ?? throw new IOException("Не удалось подготовить сейв.");
+            var output = importer.StandardOutput.ReadToEndAsync(); var errors = importer.StandardError.ReadToEndAsync();
+            await importer.WaitForExitAsync();
+            if (importer.ExitCode != 0) throw new IOException((await errors) + (await output));
+            Log((await output).Trim());
+            Storage.Write(SettingsPath, config); settings = config;
+            Log("Выбранный сейв загружен в новый слот. Прежний мир сохранён отдельно: " + (previousSlot.Length == 0 ? "server/world" : "server/worlds/" + previousSlot));
+            Log("Теперь нажми «Запустить и подключиться». Продолжение пойдёт с выбранного сейва.");
+        }
+        finally { if (File.Exists(request)) File.Delete(request); }
+    });
     private async void Invite_Click(object sender, RoutedEventArgs e) => await Run(async () =>
     {
         var config = ReadForm();
