@@ -47,6 +47,7 @@ public static class NetworkChecks
             var first = Connect("Alpha", "test-password"); Until(() => first.Authenticated);
             var second = Connect("Bravo", "test-password"); Until(() => second.Authenticated);
             check(first.Authenticated && second.Authenticated, "two clients authenticate and receive full world data");
+            check(server.HostStartup.Ready && server.worldData.SnapshotGeneration >= 1, "guest network transfer waits for the host's one-time full startup snapshot");
             if (tcp) check(first.TcpOffers > 0 && second.TcpOffers > 0, "TCP snapshot is offered only after authenticated joining");
             if (tcp && rejectTcp) check(first.TcpDownloads == 0 && second.TcpDownloads == 0, "explicit TCP failure falls back to complete UDP world");
             if (tcp && !rejectTcp && !lateTcp) check(first.TcpDownloads > 0 && second.TcpDownloads > 0, "TCP world transfer validates payload and acknowledges before entering play");

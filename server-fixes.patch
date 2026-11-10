@@ -145,10 +145,22 @@ index 0000000..c6dcb25
 +    }
 +}
 diff --git a/Source/Common/CommandHandler.cs b/Source/Common/CommandHandler.cs
-index ef7b43b..82733ed 100644
+index ef7b43b..d8f4a69 100644
 --- a/Source/Common/CommandHandler.cs
 +++ b/Source/Common/CommandHandler.cs
-@@ -65,6 +65,9 @@ namespace Multiplayer.Common
+@@ -20,6 +20,11 @@ namespace Multiplayer.Common
+             // policy
+             if (sourcePlayer != null)
+             {
++                if (server.HostStartup.PauseRequired && cmdType is CommandType.MapTimeSpeed or CommandType.GlobalTimeSpeed or CommandType.TimeSpeedVote)
++                {
++                    sourcePlayer.SendMsg("RimTogether: ждём загрузку хоста и свежую полную точку. Игра остаётся на паузе.");
++                    return;
++                }
+                 bool debugCmd =
+                     cmdType == CommandType.DebugTools ||
+                     cmdType == CommandType.Sync && server.InitData!.DebugOnlySyncCmds.Contains(BitConverter.ToInt32(data, 0));
+@@ -65,6 +70,9 @@ namespace Multiplayer.Common
              }
  
              SentCmds++;
@@ -158,6 +170,91 @@ index ef7b43b..82733ed 100644
          }
  
          public void PauseAll()
+diff --git a/Source/Common/HostStartupSnapshot.cs b/Source/Common/HostStartupSnapshot.cs
+new file mode 100644
+index 0000000..e5cbc0b
+--- /dev/null
++++ b/Source/Common/HostStartupSnapshot.cs
+@@ -0,0 +1,79 @@
++using System;
++using System.Threading.Tasks;
++
++namespace Multiplayer.Common;
++
++// One full, paused base per host load. No age/periodic refresh policy lives here.
++public sealed class HostStartupSnapshot(MultiplayerServer server)
++{
++    private TaskCompletionSource<bool> ready = NewGate();
++    private ServerPlayer? host;
++    private bool loaded;
++    private int requestId;
++    public bool Ready { get; private set; }
++    public bool PauseRequired => server.IsStandaloneServer && !Ready;
++    private static TaskCompletionSource<bool> NewGate() => new(TaskCreationOptions.RunContinuationsAsynchronously);
++
++    public void BeginLoading(ServerPlayer player)
++    {
++        if (!server.IsStandaloneServer || !player.IsHost) return;
++        requestId = 0;
++        server.worldData.AbortJoinPointCreation();
++        if (ready.Task.IsCompleted) ready = NewGate();
++        host = player; loaded = false; requestId = 0; Ready = false;
++        ServerLog.Log("HOST SNAPSHOT: waiting for host load/replay; world remains paused");
++    }
++
++    public void WorldReady(ServerPlayer player)
++    {
++        if (!server.IsStandaloneServer || !player.IsHost || host != player || loaded) return;
++        loaded = true;
++        server.commands.PauseAll();
++        Tick();
++    }
++
++    public void Tick()
++    {
++        if (!server.IsStandaloneServer || Ready || !loaded || host == null || requestId != 0 || ready.Task.IsCompleted) return;
++        if (!host.IsPlaying || host.status != PlayerStatus.Playing || host.simulating || host.frozen) return;
++        if (!server.worldData.TryStartJoinPointCreation(true)) return;
++        requestId = server.worldData.PendingJoinPointId;
++        ServerLog.Log("HOST SNAPSHOT: creating one fresh full point after host load; id=" + requestId);
++    }
++
++    public void Committed(int id)
++    {
++        if (requestId == 0 || requestId != id) return;
++        requestId = 0; Ready = true;
++        ready.TrySetResult(true);
++        ServerLog.Log("HOST SNAPSHOT READY: fresh full base committed; world stays paused until manual resume");
++    }
++
++    public void Aborted(int id)
++    {
++        if (requestId == 0 || requestId != id) return;
++        requestId = 0; ready.TrySetResult(false);
++        ServerLog.Error("HOST SNAPSHOT FAILED: cached history retained; reconnect host to retry. World remains paused.");
++    }
++
++    public void Disconnected(ServerPlayer player)
++    {
++        if (!server.IsStandaloneServer || !player.IsHost) return;
++        host = null; loaded = false; requestId = 0; Ready = false;
++        if (ready.Task.IsCompleted) ready = NewGate();
++        server.commands.PauseAll();
++    }
++
++    public async Task WaitUntilReady()
++    {
++        if (!server.IsStandaloneServer || Ready) return;
++        var timeout = Task.Delay(TimeSpan.FromMinutes(5));
++        while (!Ready)
++        {
++            var gate = ready.Task;
++            if (await Task.WhenAny(gate, timeout) != gate)
++                throw new TimeoutException("Fresh host snapshot is not ready. Load the host first and retry joining.");
++            if (!await gate) throw new InvalidOperationException("Fresh host snapshot failed; cached history was not used for guest entry. Reconnect host.");
++        }
++    }
++}
 diff --git a/Source/Common/LiteNetManager.cs b/Source/Common/LiteNetManager.cs
 index e8b03ab..139a6fc 100644
 --- a/Source/Common/LiteNetManager.cs
@@ -171,10 +268,16 @@ index e8b03ab..139a6fc 100644
                  };
              }
 diff --git a/Source/Common/MultiplayerServer.cs b/Source/Common/MultiplayerServer.cs
-index 88ddbc0..6a94833 100644
+index 88ddbc0..11b4c88 100644
 --- a/Source/Common/MultiplayerServer.cs
 +++ b/Source/Common/MultiplayerServer.cs
-@@ -39,6 +39,8 @@ namespace Multiplayer.Common
+@@ -34,11 +34,14 @@ namespace Multiplayer.Common
+         public static readonly Regex UsernamePattern = new(@"^[a-zA-Z0-9_]+$");
+ 
+         public WorldData worldData;
++        public HostStartupSnapshot HostStartup;
+         public FreezeManager freezeManager;
+         public CommandHandler commands;
          public ChatCmdManager chatCmdManager;
          public PlayerManager playerManager;
          public List<INetManager> netManagers = [];
@@ -183,7 +286,15 @@ index 88ddbc0..6a94833 100644
          public IEnumerable<ServerPlayer> JoinedPlayers => playerManager.JoinedPlayers;
          public IEnumerable<ServerPlayer> PlayingPlayers => playerManager.PlayingPlayers;
          public IEnumerable<ServerPlayer> PlayingIngamePlayers => playerManager.PlayingPlayers.Where(p => p.status == PlayerStatus.Playing);
-@@ -94,6 +96,8 @@ namespace Multiplayer.Common
+@@ -80,6 +83,7 @@ namespace Multiplayer.Common
+             this.settings = settings;
+ 
+             worldData = new WorldData(this);
++            HostStartup = new HostStartupSnapshot(this);
+             freezeManager = new FreezeManager(this);
+             commands = new CommandHandler(this);
+             chatCmdManager = new ChatCmdManager();
+@@ -94,6 +98,8 @@ namespace Multiplayer.Common
  
          public void Run()
          {
@@ -192,15 +303,16 @@ index 88ddbc0..6a94833 100644
              ServerLog.Detail("Server started");
  
              Stopwatch time = Stopwatch.StartNew();
-@@ -115,6 +119,7 @@ namespace Multiplayer.Common
+@@ -115,6 +121,8 @@ namespace Multiplayer.Common
                      queue.RunQueue(ServerLog.Error);
                      netManagers.ForEach(manager => manager.Tick());
                      TickNet();
 +                    worldData.TickJoinPointTimeout(NetTimer);
++                    HostStartup.Tick();
  
                      int ticked = 0;
                      while (realTime > 0 && ticked < 2)
-@@ -170,6 +175,7 @@ namespace Multiplayer.Common
+@@ -170,6 +178,7 @@ namespace Multiplayer.Common
              {
                  ServerLog.Log($"Exception stopping the server: {e}");
              }
@@ -208,7 +320,7 @@ index 88ddbc0..6a94833 100644
          }
  
          private void TickNet()
-@@ -206,6 +212,7 @@ namespace Multiplayer.Common
+@@ -206,6 +215,7 @@ namespace Multiplayer.Common
  
              playerManager.OnServerStop();
              netManagers.ForEach(manager => manager.Stop());
@@ -216,7 +328,7 @@ index 88ddbc0..6a94833 100644
  
              instance = null;
          }
-@@ -215,6 +222,14 @@ namespace Multiplayer.Common
+@@ -215,6 +225,14 @@ namespace Multiplayer.Common
              queue.Enqueue(action);
          }
  
@@ -362,7 +474,7 @@ index 641d493..97edd20 100644
          buf.Bind(ref mpVersion);
          buf.Bind(ref defStatus, BinderOf.Enum<DefCheckStatus>());
 diff --git a/Source/Common/Networking/State/ServerJoiningState.cs b/Source/Common/Networking/State/ServerJoiningState.cs
-index ebf0895..a9f432e 100644
+index ebf0895..82218b8 100644
 --- a/Source/Common/Networking/State/ServerJoiningState.cs
 +++ b/Source/Common/Networking/State/ServerJoiningState.cs
 @@ -15,6 +15,7 @@ public class ServerJoiningState : AsyncConnectionState
@@ -373,7 +485,16 @@ index ebf0895..a9f432e 100644
  
          while (await Server.InitDataTask() is null && await EndIfDead())
              if (Server.InitDataState == InitDataState.Waiting)
-@@ -93,6 +94,11 @@ public class ServerJoiningState : AsyncConnectionState
+@@ -25,6 +26,8 @@ public class ServerJoiningState : AsyncConnectionState
+         if (!HandleClientJoinData(await TypedPacket<ClientJoinDataPacket>()))
+             return;
+ 
++        Server.HostStartup.BeginLoading(Player);
++
+         if (Server.settings.pauseOnJoin)
+             Server.commands.PauseAll();
+ 
+@@ -93,6 +96,11 @@ public class ServerJoiningState : AsyncConnectionState
  
      private async Task RequestInitData()
      {
@@ -385,7 +506,7 @@ index ebf0895..a9f432e 100644
          ClientInitDataPacket? initData = null;
          var completionSource = Server.StartInitData();
          try
-@@ -148,6 +154,7 @@ public class ServerJoiningState : AsyncConnectionState
+@@ -148,6 +156,7 @@ public class ServerJoiningState : AsyncConnectionState
          {
              gameName = Server.settings.gameName,
              playerId = Player.id,
@@ -394,7 +515,7 @@ index ebf0895..a9f432e 100644
              mpVersion = MpVersion.Version,
              defStatus = defStatus,
 diff --git a/Source/Common/Networking/State/ServerLoadingState.cs b/Source/Common/Networking/State/ServerLoadingState.cs
-index 7663880..bfe4c74 100644
+index 7663880..a8ec0a1 100644
 --- a/Source/Common/Networking/State/ServerLoadingState.cs
 +++ b/Source/Common/Networking/State/ServerLoadingState.cs
 @@ -1,11 +1,44 @@
@@ -451,9 +572,16 @@ index 7663880..bfe4c74 100644
  
          var idMatched = Player.keepAliveId == packet.id;
          connection.OnKeepAliveArrived(idMatched);
-@@ -32,15 +65,51 @@ public class ServerLoadingState : AsyncConnectionState
+@@ -29,18 +62,58 @@ public class ServerLoadingState : AsyncConnectionState
+ 
+     protected override async Task RunState()
+     {
++        if (!Player.IsHost) await Server.HostStartup.WaitUntilReady();
++        await EndIfDead();
          await Server.worldData.WaitJoinPoint();
          await EndIfDead();
++        if (!Player.IsHost) await Server.HostStartup.WaitUntilReady();
++        await EndIfDead();
  
 -        SendWorldData();
 +        SnapshotCaptured = true;
@@ -489,7 +617,7 @@ index 7663880..bfe4c74 100644
  
          Player.SendPlayerList();
          connection.ChangeState(ConnectionStateEnum.ServerPlaying);
-+        if (readyAfterTcp) { Player.simulating = false; Player.UpdateStatus(PlayerStatus.Playing); }
++        if (readyAfterTcp) Player.MarkWorldReady();
      }
  
 -    public void SendWorldData()
@@ -506,7 +634,7 @@ index 7663880..bfe4c74 100644
  
          ByteWriter writer = new ByteWriter();
  
-@@ -83,9 +152,6 @@ public class ServerLoadingState : AsyncConnectionState
+@@ -83,9 +156,6 @@ public class ServerLoadingState : AsyncConnectionState
          foreach (var syncInfo in Server.worldData.syncInfos)
              writer.WritePrefixedBytes(syncInfo);
  
@@ -518,10 +646,10 @@ index 7663880..bfe4c74 100644
      }
  }
 diff --git a/Source/Common/Networking/State/ServerPlayingState.cs b/Source/Common/Networking/State/ServerPlayingState.cs
-index c6d22e2..8dc7140 100644
+index c6d22e2..461f53a 100644
 --- a/Source/Common/Networking/State/ServerPlayingState.cs
 +++ b/Source/Common/Networking/State/ServerPlayingState.cs
-@@ -6,15 +6,20 @@ namespace Multiplayer.Common
+@@ -6,17 +6,23 @@ namespace Multiplayer.Common
  {
      public class ServerPlayingState(ConnectionBase conn) : MpConnectionState(conn)
      {
@@ -530,19 +658,23 @@ index c6d22e2..8dc7140 100644
          [PacketHandler(Packets.Client_WorldReady)]
          public void HandleWorldReady(ByteReader data)
          {
-+            Player.simulating = false;
-             Player.UpdateStatus(PlayerStatus.Playing);
+-            Player.UpdateStatus(PlayerStatus.Playing);
++            Player.MarkWorldReady();
          }
  
          [PacketHandler(Packets.Client_RequestRejoin)]
          public void HandleRejoin(ByteReader data)
          {
++            Server.HostStartup.BeginLoading(Player);
 +            Player.simulating = true;
 +            Player.UpdateStatus(PlayerStatus.Simulating);
              connection.ChangeState(ConnectionStateEnum.ServerLoading);
              Player.ResetTimeVotes();
++            if (Server.IsStandaloneServer && Player.IsHost) Server.commands.PauseAll();
          }
-@@ -83,25 +88,30 @@ namespace Multiplayer.Common
+ 
+         [TypedPacketHandler]
+@@ -83,25 +89,30 @@ namespace Multiplayer.Common
          [PacketHandler(Packets.Client_WorldDataUpload, allowFragmented: true)]
          public void HandleWorldDataUpload(ByteReader data)
          {
@@ -581,7 +713,7 @@ index c6d22e2..8dc7140 100644
          }
  
          [TypedPacketHandler]
-@@ -131,7 +141,7 @@ namespace Multiplayer.Common
+@@ -131,7 +142,7 @@ namespace Multiplayer.Common
              Player.keepAliveAt = Server.NetTimer;
  
              if (Player.IsHost)
@@ -590,7 +722,7 @@ index c6d22e2..8dc7140 100644
  
              var idMatched = Player.keepAliveId == packet.id;
              connection.OnKeepAliveArrived(idMatched);
-@@ -145,6 +155,8 @@ namespace Multiplayer.Common
+@@ -145,6 +156,8 @@ namespace Multiplayer.Common
              if (arbiter ? !Player.IsArbiter : !Player.IsHost) return; // policy
  
              // Keep at most 10 sync infos
@@ -600,7 +732,7 @@ index c6d22e2..8dc7140 100644
              if (Server.worldData.syncInfos.Count > 10)
                  Server.worldData.syncInfos.RemoveAt(0);
 diff --git a/Source/Common/PlayerManager.cs b/Source/Common/PlayerManager.cs
-index cc3da92..5e46c50 100644
+index cc3da92..f9b120f 100644
 --- a/Source/Common/PlayerManager.cs
 +++ b/Source/Common/PlayerManager.cs
 @@ -33,13 +33,14 @@ namespace Multiplayer.Common
@@ -621,7 +753,7 @@ index cc3da92..5e46c50 100644
              if (lastConnection.TryGetValue(id, out var last) && clock.ElapsedMilliseconds - last < ThrottleMillis)
                  return MpDisconnectReason.Throttled;
  
-@@ -66,12 +67,15 @@ namespace Multiplayer.Common
+@@ -66,12 +67,16 @@ namespace Multiplayer.Common
          {
              if (conn.State == ConnectionStateEnum.Disconnected) return;
  
@@ -632,13 +764,14 @@ index cc3da92..5e46c50 100644
  
              ServerPlayer player = conn.serverPlayer;
              Players.Remove(player);
++            server.HostStartup.Disconnected(player);
  
 -            if (player.IsHost && server.worldData.CreatingJoinPoint)
 +            if (server.worldData.CreatingJoinPoint && (player.IsHost || !Players.Any(p => p.hasJoined)))
              {
                  server.worldData.AbortJoinPointCreation();
                  ServerLog.Log("Aborted join point creation because the host disconnected.");
-@@ -109,14 +113,20 @@ namespace Multiplayer.Common
+@@ -109,14 +114,20 @@ namespace Multiplayer.Common
          public void OnDesync(ServerPlayer player, int tick, int diffAt)
          {
              player.UpdateStatus(PlayerStatus.Desynced);
@@ -706,6 +839,24 @@ index 0000000..ad5521e
 +    public override void Post(SendOrPostCallback callback, object? state) => server.Enqueue(() => callback(state));
 +    public override SynchronizationContext CreateCopy() => this;
 +}
+diff --git a/Source/Common/ServerPlayer.cs b/Source/Common/ServerPlayer.cs
+index 51471d2..cf15968 100644
+--- a/Source/Common/ServerPlayer.cs
++++ b/Source/Common/ServerPlayer.cs
+@@ -117,6 +117,13 @@ namespace Multiplayer.Common
+             Server.SendToPlaying(ServerPlayerListPacket.Status(id, newStatus));
+         }
+ 
++        public void MarkWorldReady()
++        {
++            simulating = false;
++            UpdateStatus(PlayerStatus.Playing);
++            Server.HostStartup.WorldReady(this);
++        }
++
+         public void ResetTimeVotes()
+         {
+             Server.commands.Send(
 diff --git a/Source/Common/SnapshotCompression.cs b/Source/Common/SnapshotCompression.cs
 new file mode 100644
 index 0000000..7819f0f
@@ -782,7 +933,7 @@ index be9f185..c8477fd 100644
          public static readonly string? GitDescription = Assembly.GetExecutingAssembly()
              .GetCustomAttributes<AssemblyMetadataAttribute>()
 diff --git a/Source/Common/WorldData.cs b/Source/Common/WorldData.cs
-index a76e18d..34a67d1 100644
+index a76e18d..095226d 100644
 --- a/Source/Common/WorldData.cs
 +++ b/Source/Common/WorldData.cs
 @@ -1,5 +1,6 @@
@@ -792,20 +943,21 @@ index a76e18d..34a67d1 100644
  using System.Threading.Tasks;
  
  namespace Multiplayer.Common;
-@@ -21,6 +22,12 @@ public class WorldData
+@@ -21,6 +22,13 @@ public class WorldData
      private TaskCompletionSource<WorldData>? dataSource;
  
      public bool CreatingJoinPoint => tmpMapCmds != null;
 +    public int PendingJoinPointId { get; private set; }
 +    private int nextJoinPointId;
 +    private int joinPointStartedAt;
++    private int pendingSnapshotTick;
 +    public int LastSnapshotAtNetTick { get; private set; }
 +    public int SnapshotGeneration { get; private set; }
 +    public const int JoinPointTimeoutTicks = MultiplayerServer.NetTicksPerSecond * 30;
  
      public MultiplayerServer Server { get; }
  
-@@ -37,9 +44,15 @@ public class WorldData
+@@ -37,9 +45,16 @@ public class WorldData
          if (CreatingJoinPoint)
              return false;
  
@@ -818,12 +970,17 @@ index a76e18d..34a67d1 100644
 -        Server.commands.Send(CommandType.CreateJoinPoint, ScheduledCommand.NoFaction, ScheduledCommand.Global, Array.Empty<byte>());
 +        PendingJoinPointId = ++nextJoinPointId;
 +        joinPointStartedAt = Server.NetTimer;
++        pendingSnapshotTick = Server.gameTimer;
 +        Server.commands.Send(CommandType.CreateJoinPoint, ScheduledCommand.NoFaction, ScheduledCommand.Global, ByteWriter.GetBytes(PendingJoinPointId));
          tmpMapCmds = new Dictionary<int, List<byte[]>>();
          dataSource = new TaskCompletionSource<WorldData>();
  
-@@ -50,6 +63,9 @@ public class WorldData
+@@ -48,11 +63,17 @@ public class WorldData
+ 
+     public void EndJoinPointCreation()
      {
++        var completedId = PendingJoinPointId;
++        Server.startingTimer = pendingSnapshotTick;
          mapCmds = tmpMapCmds!;
          tmpMapCmds = null;
 +        PendingJoinPointId = 0;
@@ -832,15 +989,23 @@ index a76e18d..34a67d1 100644
          lastJoinPointAtWorkTicks = Server.workTicks;
          dataSource!.SetResult(this);
          dataSource = null;
-@@ -61,6 +77,7 @@ public class WorldData
++        Server.HostStartup.Committed(completedId);
+     }
+ 
+     public void AbortJoinPointCreation()
+@@ -60,13 +81,39 @@ public class WorldData
+         if (!CreatingJoinPoint)
              return;
  
++        var abortedId = PendingJoinPointId;
          tmpMapCmds = null;
 +        PendingJoinPointId = 0;
          dataSource?.SetResult(this);
          dataSource = null;
++        Server.HostStartup.Aborted(abortedId);
      }
-@@ -69,4 +86,27 @@ public class WorldData
+ 
+     public Task<WorldData> WaitJoinPoint()
      {
          return dataSource?.Task ?? Task.FromResult(this);
      }

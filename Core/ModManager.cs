@@ -128,7 +128,7 @@ public sealed class ModManager(HttpClient http, string dataRoot, Action<string> 
         if (healthy)
         {
             PrepareConfig(game, configPath, backup);
-            log("Multiplayer " + Contract.Version + ": все файлы проверены, профиль Radmin готов."); return;
+            log("Multiplayer " + Contract.Version + " / " + Contract.GuardRevision + " / протокол " + Contract.Protocol + ": все DLL проверены, профиль Radmin готов."); return;
         }
         var staging = Path.Combine(mods, ".rimtogether-stage-" + Guid.NewGuid().ToString("N"));
         var moved = new List<(string Original, string Backup)>();
@@ -155,7 +155,7 @@ public sealed class ModManager(HttpClient http, string dataRoot, Action<string> 
             PrepareConfig(game, configPath, backup);
             var hashes = Directory.GetFiles(destination, "*", SearchOption.AllDirectories).ToDictionary(f => Path.GetRelativePath(destination, f), Hash);
             Storage.Write(state, hashes);
-            log("Установлен Multiplayer " + Contract.Version + ". Резервная копия: " + backup);
+            log("Установлен Multiplayer " + Contract.Version + " / " + Contract.GuardRevision + " / протокол " + Contract.Protocol + ". Резервная копия: " + backup);
         }
         catch (Exception installError)
         {

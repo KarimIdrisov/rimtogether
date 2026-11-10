@@ -12,6 +12,7 @@ parser.add_argument('--before-seconds', type=int, default=600)
 parser.add_argument('--after-seconds', type=int, default=600)
 parser.add_argument('--bundle', type=pathlib.Path, help='Explicit locally built candidate bundle; default is installed production release')
 parser.add_argument('--batchmode', action='store_true', help='Diagnostic only; default uses normal windowed Unity rendering')
+parser.add_argument('--startup-only', action='store_true', help='Check one paused full host snapshot, guest entry and manual resume; no fault or long soak')
 args = parser.parse_args()
 repo = pathlib.Path(__file__).resolve().parents[1]
 build = repo/'.build'
@@ -166,11 +167,37 @@ try:
     while not any(line.startswith('READY ') for line in server_lines):
         if server.poll() is not None or time.monotonic()>deadline: raise RuntimeError('Production server not ready')
         time.sleep(0.25)
+    initial_base_tick=json.loads((run/'world/checkpoint.json').read_text(encoding='utf-8-sig'))['StartingTick']
     start_client('host')
     wait_until(lambda:'RimTogether SYNC published authority opinion' in text('host'),240,'host publication')
     start_client('guest')
     wait_until(lambda:'RimTogether SYNC verified tick=' in text('guest'),240,'guest first comparison')
     event('both_clients_verified')
+    if args.startup_only:
+        wait_until(lambda:any('HOST SNAPSHOT READY:' in line for line in server_lines),60,'one-time startup full snapshot')
+        state_path=run/'world/checkpoint.json'
+        wait_until(lambda:state_path.exists() and json.loads(state_path.read_text(encoding='utf-8-sig'))['StartingTick']>initial_base_tick,45,'fresh checkpoint persistence')
+        cp=json.loads(state_path.read_text(encoding='utf-8-sig'))
+        result['fresh_base_tick']=cp['StartingTick']
+        def paused_matches():
+            host=states('host'); guest=states('guest')
+            common=sorted(t for t in host.keys()&guest.keys() if t>cp['StartingTick'])
+            if len(common)<3:return False
+            samples=common[-3:]
+            if any(host[t]['hash']!=guest[t]['hash'] for t in samples):raise RuntimeError('Startup world fingerprints differ')
+            if len({host[t]['map_ticks'] for t in samples})!=1:raise RuntimeError('World advanced before manual resume')
+            result['paused_matching_ticks']=samples; result['paused_map_tick']=host[samples[-1]]['map_ticks']
+            return True
+        wait_until(paused_matches,45,'equal paused worlds after guest load')
+        if sum('HOST SNAPSHOT: creating one fresh' in line for line in server_lines)!=1:raise RuntimeError('Repeated startup full snapshots')
+        event('startup_paused_worlds_match',base_tick=cp['StartingTick'],samples=result['paused_matching_ticks'])
+        control('host','speed|1')
+        def resumed():
+            host=states('host');guest=states('guest')
+            return any(t>result['paused_matching_ticks'][-1] and host[t]['map_ticks']>result['paused_map_tick'] and host[t]['hash']==guest[t]['hash'] for t in host.keys()&guest.keys())
+        wait_until(resumed,30,'manual resume advances both worlds identically')
+        result['status']='PASS';event('startup_test_passed')
+        sys.exit(0)
     control('host','speed|1')
     compare_window(args.before_seconds,'before')
     upload_count=sum('Got world upload ' in line for line in server_lines)
@@ -204,6 +231,10 @@ try:
     event('same_world_restored',seconds_approx=result['recovered_same_world_seconds_approx'],reports=result['desync_reports'])
     compare_window(args.after_seconds,'after',fault_tick)
     result['status']='PASS'; event('test_passed')
+except SystemExit as error:
+    if error.code not in (0,None):
+        result['status']='FAIL';result['error']=repr(error)
+    raise
 except BaseException as error:
     result['status']='FAIL'; result['error']=repr(error); event('test_failed',error=repr(error))
     raise

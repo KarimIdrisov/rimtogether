@@ -95,6 +95,7 @@ try
     var unsafeRollback = Checkpoint.Capture(new MultiplayerServer(new ServerSettings()));
     Check(unsafeRollback.Tag != Contract.Tag, "guard checkpoint tag prevents old launcher from silently replaying guard commands");
     RecoveryChecks.Run(checkpoint, Check, Throws);
+    HostStartupChecks.Run(checkpoint, Check, Throws);
     FramingChecks.Run(Check);
     ListenerChecks.Run(Check);
     NetworkChecks.Run(checkpoint, Check);
