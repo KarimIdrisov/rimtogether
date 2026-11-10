@@ -65,7 +65,7 @@ $destinationFull = [IO.Path]::GetFullPath($Destination)
 $publishRoot = Join-Path $cache ('publish-' + [Guid]::NewGuid().ToString('N'))
 foreach ($project in @('Server', 'Launcher')) {
     $target = Join-Path $publishRoot $project
-    dotnet publish (Join-Path $sourceRoot "$project/$project.csproj") -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false "-p:Version=$Version" -o $target
+    dotnet publish (Join-Path $sourceRoot "$project/$project.csproj") -c Release -m:1 -r win-x64 --self-contained true -p:PublishSingleFile=false "-p:Version=$Version" -o $target
     if ($LASTEXITCODE -ne 0) { throw "$project build failed" }
     $mergeRoot = if ($project -eq 'Server') { Join-Path $destinationFull 'server' } else { $destinationFull }
     foreach ($file in Get-ChildItem -LiteralPath $target -File -Recurse) {
@@ -81,7 +81,7 @@ foreach ($project in @('Server', 'Launcher')) {
 # The portable GUI entry point carries its own runtime. Its engine version is pinned
 # so unrelated app releases don't force a replacement of this larger bootstrap.
 $bootstrapTarget = Join-Path $publishRoot 'Bootstrap'
-dotnet publish (Join-Path $sourceRoot 'Bootstrap/Bootstrap.csproj') -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:Version=2.0.0 -o $bootstrapTarget
+dotnet publish (Join-Path $sourceRoot 'Bootstrap/Bootstrap.csproj') -c Release -m:1 -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:Version=2.0.0 -o $bootstrapTarget
 if ($LASTEXITCODE -ne 0) { throw 'GUI bootstrap build failed' }
 Copy-Item -LiteralPath (Join-Path $bootstrapTarget 'RimTogether.Start.exe') -Destination $destinationFull -Force
 $previousIntegration = $env:RIMTOGETHER_INTEGRATION_DIR

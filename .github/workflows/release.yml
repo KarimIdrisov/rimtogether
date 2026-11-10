@@ -65,4 +65,5 @@ jobs:
           SOURCE_SHA: ${{ github.sha }}
           RELEASE_VERSION: v1.1.${{ github.run_number }}
         run: |
-          gh release create "$RELEASE_VERSION" release-assets/* --target "$SOURCE_SHA" --title "RimTogether $RELEASE_VERSION" --notes "Verified launcher, server and Multiplayer cohort. Download RimTogether.Start.exe once; future updates are automatic. Personal settings and saves stay on your PC." --latest
+          gh release create "$RELEASE_VERSION" release-assets/* --draft --target "$SOURCE_SHA" --title "RimTogether $RELEASE_VERSION" --notes "Graphical launcher and file-level updates. Download RimTogether.Start.exe once; future updates reuse unchanged components. Personal settings and saves stay on your PC."
+          gh release edit "$RELEASE_VERSION" --draft=false --latest

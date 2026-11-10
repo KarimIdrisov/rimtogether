@@ -135,6 +135,8 @@ public sealed class UpdateService(string root):IDisposable
                 if(!response.IsSuccessStatusCode){var code=response.StatusCode;response.Dispose();throw new HttpRequestException("GitHub: "+code);}return response;
             }
             catch(HttpRequestException) when(attempt<2){await Task.Delay(1000*(attempt+1),cancellation);}
+            catch(OperationCanceledException) when(!cancellation.IsCancellationRequested && attempt<2){await Task.Delay(1000*(attempt+1),cancellation);}
+            catch(OperationCanceledException error) when(!cancellation.IsCancellationRequested){throw new IOException("GitHub не ответил вовремя. Повтори обновление.",error);}
         }
     }
     private async Task<byte[]> GetBytes(string url,int limit,CancellationToken cancellation)
