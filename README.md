@@ -22,6 +22,8 @@ The current cohort targets RimWorld 1.6.4633 and Multiplayer 0.11.5 with `rt-gua
 
 ## Limits
 
+The v1.1.18 updater is a WPF window shared with the launcher. Releases retain the full archive and schema-1 manifest for old entry points, and additionally publish a SHA256-bound file index plus compressed content-addressed components. The new updater copies verified unchanged files, downloads only missing hashes, stages an immutable version and switches the pointer after validation. Runtime files are separate from app assemblies so version bumps do not require redownloading the .NET runtime. The GUI bootstrap has a fixed engine version and an update-only dependency to avoid gameplay changes rebuilding its large portable runtime. Initial migration from the old console entry point may still require one full bundle; the managed launcher replaces an external canonical entry point after that process exits. No game saves or server world slots are touched by app updates.
+
 Automated tests cover installation/rollback, update archive validation, fallback, checkpoints, authentication, two UDP clients, world transfer and rejection of a third connection. An actual two-PC game session over Radmin still needs verification. Desync detection remains enabled.
 
 Based on the MIT-licensed RimWorld Multiplayer project. See [LICENSE-Multiplayer.txt](LICENSE-Multiplayer.txt).

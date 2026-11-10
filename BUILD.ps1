@@ -61,11 +61,29 @@ try {
     }
 } finally { $env:RIMTOGETHER_TEST_REPLAY = $previousExport; $env:RIMTOGETHER_GUARD_PAYLOAD = $previousGuardPayload }
 $destinationFull = [IO.Path]::GetFullPath($Destination)
-foreach ($project in @('Launcher', 'Server', 'Bootstrap')) {
-    $target = if ($project -eq 'Server') { Join-Path $destinationFull 'server' } else { $destinationFull }
-    dotnet publish (Join-Path $sourceRoot "$project/$project.csproj") -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true "-p:Version=$Version" -o $target
+# Shared runtime files stay byte-identical between application releases.
+$publishRoot = Join-Path $cache ('publish-' + [Guid]::NewGuid().ToString('N'))
+foreach ($project in @('Server', 'Launcher')) {
+    $target = Join-Path $publishRoot $project
+    dotnet publish (Join-Path $sourceRoot "$project/$project.csproj") -c Release -r win-x64 --self-contained true -p:PublishSingleFile=false "-p:Version=$Version" -o $target
     if ($LASTEXITCODE -ne 0) { throw "$project build failed" }
+    $mergeRoot = if ($project -eq 'Server') { Join-Path $destinationFull 'server' } else { $destinationFull }
+    foreach ($file in Get-ChildItem -LiteralPath $target -File -Recurse) {
+        if ($file.Extension -in @('.pdb', '.xml')) { continue }
+        if ($file.Name -eq 'Assembly-CSharp.dll' -or $file.Name -like 'UnityEngine*.dll') { throw 'Game reference assemblies must never enter a release' }
+        $relative = [IO.Path]::GetRelativePath($target, $file.FullName)
+        $destinationFile = Join-Path $mergeRoot $relative
+        if ((Test-Path -LiteralPath $destinationFile) -and (Get-FileHash -LiteralPath $destinationFile).Hash -ne (Get-FileHash -LiteralPath $file.FullName).Hash) { throw "Shared publish collision: $relative" }
+        New-Item -ItemType Directory -Path (Split-Path -Parent $destinationFile) -Force | Out-Null
+        Copy-Item -LiteralPath $file.FullName -Destination $destinationFile -Force
+    }
 }
+# The portable GUI entry point carries its own runtime. Its engine version is pinned
+# so unrelated app releases don't force a replacement of this larger bootstrap.
+$bootstrapTarget = Join-Path $publishRoot 'Bootstrap'
+dotnet publish (Join-Path $sourceRoot 'Bootstrap/Bootstrap.csproj') -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:EnableCompressionInSingleFile=true -p:Version=2.0.0 -o $bootstrapTarget
+if ($LASTEXITCODE -ne 0) { throw 'GUI bootstrap build failed' }
+Copy-Item -LiteralPath (Join-Path $bootstrapTarget 'RimTogether.Start.exe') -Destination $destinationFull -Force
 $previousIntegration = $env:RIMTOGETHER_INTEGRATION_DIR
 try {
     $env:RIMTOGETHER_INTEGRATION_DIR = Join-Path $cache 'process-test-transport2'
@@ -93,7 +111,7 @@ if (Test-Path -LiteralPath $bundle) { Remove-Item -LiteralPath $bundle }
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zip = [IO.Compression.ZipFile]::Open($bundle, [IO.Compression.ZipArchiveMode]::Create)
 try {
-    $releaseFiles = @('RimTogether.exe', 'RimTogether.Start.exe', 'server/RimTogether.Server.exe', 'packages/Multiplayer-v0.11.5.zip', 'packages/guard/manifest.json', 'START-HERE-RU.txt', 'LICENSE-Multiplayer.txt') + @($guardFiles.Keys | ForEach-Object { "packages/guard/$_" })
+    $releaseFiles = @(Get-ChildItem -LiteralPath $destinationFull -File -Recurse | ForEach-Object { [IO.Path]::GetRelativePath($destinationFull, $_.FullName).Replace('\', '/') } | Sort-Object)
     foreach ($relative in $releaseFiles) {
         $file = Join-Path $destinationFull $relative
         [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, $file, $relative, [IO.Compression.CompressionLevel]::Optimal) | Out-Null
@@ -106,6 +124,27 @@ $manifest = [ordered]@{
     Sha256 = (Get-FileHash -LiteralPath $bundle -Algorithm SHA256).Hash;
     Size = (Get-Item -LiteralPath $bundle).Length; MultiplayerTag = 'v0.11.5'; CheckpointSchema = 1
 }
+$filesIndex = [ordered]@{ Schema=1; Tag="v$Version"; Commit="$commit"; ArchiveSha256=$manifest.Sha256; Files=@() }
+$assetNames = [Collections.Generic.HashSet[string]]::new()
+foreach ($relative in $releaseFiles) {
+    $sourceFile = Join-Path $destinationFull $relative
+    $hash = (Get-FileHash -LiteralPath $sourceFile -Algorithm SHA256).Hash
+    $assetName = 'part-' + $hash.ToLowerInvariant() + '.gz'
+    $assetPath = Join-Path $releaseFolder $assetName
+    if ($assetNames.Add($assetName)) {
+        $inputStream = [IO.File]::OpenRead($sourceFile)
+        $outputStream = [IO.File]::Create($assetPath)
+        try {
+            $gzipStream = [IO.Compression.GZipStream]::new($outputStream, [IO.Compression.CompressionLevel]::Optimal, $true)
+            try { $inputStream.CopyTo($gzipStream) } finally { $gzipStream.Dispose() }
+        } finally { $inputStream.Dispose(); $outputStream.Dispose() }
+    }
+    $filesIndex.Files += [ordered]@{ Path=$relative; Sha256=$hash; Size=(Get-Item -LiteralPath $sourceFile).Length; DownloadSize=(Get-Item -LiteralPath $assetPath).Length }
+}
+if ($assetNames.Count -gt 950) { throw 'Too many component assets for a release' }
+$indexPath = Join-Path $releaseFolder 'RimTogether-files.json'
+$filesIndex | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $indexPath -Encoding utf8NoBOM
+$manifest.FilesIndexHash = (Get-FileHash -LiteralPath $indexPath -Algorithm SHA256).Hash
 $manifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $releaseFolder 'RimTogether-manifest.json') -Encoding utf8NoBOM
 Copy-Item -LiteralPath (Join-Path $destinationFull 'RimTogether.Start.exe') -Destination $releaseFolder -Force
-Write-Output "Release artifacts: $releaseFolder"
+Write-Output "Release artifacts: $releaseFolder ($($releaseFiles.Count) files; $($assetNames.Count) compressed components)"

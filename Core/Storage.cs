@@ -49,7 +49,7 @@ public static class Contract
     public const int Protocol = 5403;
     public const string GuardRevision = "rt-guard2";
     public const int Port = 30502;
-    public static string DataRoot => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RimTogether");
+    public static string DataRoot => Environment.GetEnvironmentVariable("RIMTOGETHER_DATA_ROOT") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "RimTogether");
     public static string GameData => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
         "AppData", "LocalLow", "Ludeon Studios", "RimWorld by Ludeon Studios");
 }

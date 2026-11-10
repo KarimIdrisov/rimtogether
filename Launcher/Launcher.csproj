@@ -1,4 +1,4 @@
 <Project Sdk="Microsoft.NET.Sdk">
  <PropertyGroup><OutputType>WinExe</OutputType><TargetFramework>net9.0-windows</TargetFramework><UseWPF>true</UseWPF><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><AssemblyName>RimTogether</AssemblyName><Version>1.1.0</Version><ApplicationManifest>app.manifest</ApplicationManifest></PropertyGroup>
- <ItemGroup><ProjectReference Include="../Core/Core.csproj"/></ItemGroup>
+ <ItemGroup><ProjectReference Include="../Core/Core.csproj"/><Page Include="../SharedUi/Theme.xaml" Link="Theme.xaml"/><Page Include="../SharedUi/UpdateWindow.xaml" Link="UpdateWindow.xaml"/><Compile Include="../SharedUi/UpdateWindow.xaml.cs" Link="UpdateWindow.xaml.cs"/></ItemGroup>
 </Project>

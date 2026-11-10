@@ -28,7 +28,9 @@ public partial class MainWindow : Window
         InitializeComponent();
         Directory.CreateDirectory(root);
         http.DefaultRequestHeaders.UserAgent.ParseAdd("RimTogether/1.0");
-        if (File.Exists(SettingsPath))
+        if (App.IsPreview)
+            settings = new Settings { Username = "PlayerOne", HostAddress = "26.0.0.1", GamePath = "C:\\Games\\RimWorld", SeedReplay = "Колония — последний сейв.zip" };
+        else if (File.Exists(SettingsPath))
         {
             try { settings = Storage.Read<Settings>(SettingsPath); }
             catch (Exception e) { Log("Настройки повреждены: " + e.Message + ". Оригинал сохранён; проверь поля."); }
@@ -44,6 +46,7 @@ public partial class MainWindow : Window
         Role.SelectedIndex = settings.IsHost ? 0 : 1;
         Username.Text = settings.Username; HostAddress.Text = settings.HostAddress; GamePath.Text = settings.GamePath;
         ServerPassword.Password = settings.Password; ReplayPath.Text = settings.SeedReplay; AutoUpdate.IsChecked = settings.AutoUpdate; FastRecovery.IsChecked = settings.FastRecovery;
+        VersionLabel.Text = "Версия " + typeof(MainWindow).Assembly.GetName().Version?.ToString(3);
         Log("RimTogether " + typeof(MainWindow).Assembly.GetName().Version?.ToString(3) + " • " + Contract.GuardRevision + " / protocol " + Contract.Protocol + ". Сервер работает, пока включён ПК хоста.");
         Log("Другу: https://github.com/" + BundleUpdate.Repository + "/releases/latest — скачать RimTogether.Start.exe один раз. Дальше обновления при запуске.");
         Log("Сервер хранит контрольную точку каждые 30 секунд. Закрытие лаунчера останавливает сервер.");
@@ -81,6 +84,8 @@ public partial class MainWindow : Window
         PlayButton.IsEnabled = true; StartButton.IsEnabled = Role.SelectedIndex == 0 && !running;
         StopButton.IsEnabled = running;
         FastRecovery.Visibility = Role.SelectedIndex == 0 ? Visibility.Collapsed : Visibility.Visible;
+        InviteButton.Visibility = Role.SelectedIndex == 0 ? Visibility.Visible : Visibility.Collapsed;
+        ImportButton.Visibility = Role.SelectedIndex == 0 ? Visibility.Collapsed : Visibility.Visible;
         RecoveryModeHint.Visibility = Role.SelectedIndex == 0 ? Visibility.Visible : Visibility.Collapsed;
         Role.IsEnabled = Username.IsEnabled = HostAddress.IsEnabled = ServerPassword.IsEnabled = GamePath.IsEnabled = ReplayPath.IsEnabled = !running;
         if (Summary != null) Summary.Text = Contract.GuardRevision + " • Multiplayer " + Contract.Version + " • UDP 30502 • " + (running ? (serverReady ? "сервер работает" : "сервер запускается") : "сервер остановлен");
@@ -115,7 +120,7 @@ public partial class MainWindow : Window
     {
         if (server != null && !server.HasExited) return;
         if (!config.IsHost) throw new InvalidOperationException("Сервер запускает только хост.");
-        var serverExe = Path.Combine(AppContext.BaseDirectory, "server", "RimTogether.Server.exe");
+        var serverExe = ServerExecutable;
         if (!File.Exists(serverExe)) throw new FileNotFoundException("Не найдена папка server. Распакуй весь архив лаунчера.");
         var localAddresses = NetworkInterface.GetAllNetworkInterfaces().SelectMany(n => n.GetIPProperties().UnicastAddresses).Select(a => a.Address.ToString());
         if (!localAddresses.Contains(config.HostAddress)) throw new InvalidOperationException("Этот Radmin IP не принадлежит твоему ПК. Включи Radmin или исправь адрес.");
@@ -169,8 +174,21 @@ public partial class MainWindow : Window
     private async void Update_Click(object sender, RoutedEventArgs e) => await Run(async () =>
     {
         if (server != null && !server.HasExited) throw new InvalidOperationException("Перед обновлением останови сервер и закрой игру у обоих.");
-        await Prepare(ReadForm(), true);
+        var update = new UpdateWindow(Path.Combine(root,"app"), Environment.ProcessId) { Owner = this, WindowStartupLocation = WindowStartupLocation.CenterOwner };
+        update.ShowDialog();
+        if(update.Result is {} result && !Path.GetFullPath(result.Directory).TrimEnd(Path.DirectorySeparatorChar).Equals(Path.GetFullPath(AppContext.BaseDirectory).TrimEnd(Path.DirectorySeparatorChar),StringComparison.OrdinalIgnoreCase))
+        {
+            try { ReadForm(); } catch { }
+            var start = new ProcessStartInfo(Path.Combine(result.Directory,"RimTogether.exe")) { UseShellExecute = false, WorkingDirectory = result.Directory };
+            start.ArgumentList.Add("--managed");start.ArgumentList.Add("--wait-pid="+Environment.ProcessId);
+            start.Environment["RIMTOGETHER_BOOTSTRAP"] = Environment.GetEnvironmentVariable("RIMTOGETHER_BOOTSTRAP") ?? Path.Combine(AppContext.BaseDirectory,"RimTogether.Start.exe");
+            Process.Start(start); closing = true; Application.Current.Shutdown();
+        }
+        else if(update.Result != null) Log("Установлена актуальная версия " + update.Result.Bundle.Manifest.Tag + ". Multiplayer проверяется перед запуском игры.");
+        await Task.CompletedTask;
     });
+    private static string ServerExecutable => File.Exists(Path.Combine(AppContext.BaseDirectory,"RimTogether.Server.exe"))
+        ? Path.Combine(AppContext.BaseDirectory,"RimTogether.Server.exe") : Path.Combine(AppContext.BaseDirectory,"server","RimTogether.Server.exe");
     private void BrowseGame_Click(object sender, RoutedEventArgs e) { var dialog = new OpenFileDialog { Filter = "RimWorld|RimWorldWin64.exe" }; if (dialog.ShowDialog() == true) GamePath.Text = Path.GetDirectoryName(dialog.FileName)!; }
     private void BrowseReplay_Click(object sender, RoutedEventArgs e) { var dialog = new OpenFileDialog { Filter = "Multiplayer save|*.zip", InitialDirectory = Path.Combine(Contract.GameData, "MpReplays") }; if (dialog.ShowDialog() == true) ReplayPath.Text = dialog.FileName; }
 
@@ -188,7 +206,7 @@ public partial class MainWindow : Window
         try
         {
             Storage.Write(request, config);
-            var start = new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "server", "RimTogether.Server.exe"))
+            var start = new ProcessStartInfo(ServerExecutable)
                 { UseShellExecute = false, CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
             start.ArgumentList.Add(request); start.ArgumentList.Add("--prepare");
             using var importer = Process.Start(start) ?? throw new IOException("Не удалось подготовить сейв.");
@@ -227,6 +245,7 @@ public partial class MainWindow : Window
     private void Role_Changed(object sender, System.Windows.Controls.SelectionChangedEventArgs e) { if (StartButton != null) RefreshButtons(); }
     private async void Window_Closing(object? sender, CancelEventArgs e)
     {
+        if (App.IsPreview) return;
         if (closing) return;
         if (gate.CurrentCount == 0) { e.Cancel = true; Log("Дождись окончания установки или остановки сервера."); return; }
         try { ReadForm(); } catch { }
