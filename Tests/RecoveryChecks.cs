@@ -8,7 +8,7 @@ public static class RecoveryChecks
 {
     public static void Run(Checkpoint source, Action<bool, string> check, Action<Action, string> throws)
     {
-        check(MpVersion.Protocol == Contract.Protocol && Contract.Protocol == 5403, "guard client/server require dedicated-host verification protocol");
+        check(MpVersion.Protocol == Contract.Protocol && Contract.Protocol == 5404, "guard client/server require versioned grammar RNG protocol");
         check(!RecoveryPolicy.CanTickSimulation(false, ConnectionStateEnum.ClientLoading) &&
             !RecoveryPolicy.CanTickSimulation(false, ConnectionStateEnum.ClientJoining) &&
             RecoveryPolicy.CanTickSimulation(false, ConnectionStateEnum.ClientPlaying) &&

@@ -20,6 +20,7 @@ public static class GuardBinaryChecks
         var reader = client.GetMetadataReader();
         var types = reader.TypeDefinitions.Select(t => reader.GetString(reader.GetTypeDefinition(t).Name)).ToHashSet();
         check(types.Contains("SeedGravshipCanReachGravship") && types.Contains("RimTogetherRecovery"), "packaged client contains RNG isolation and bounded recovery patches");
+        check(types.Contains("BookGrammarScope"), "packaged client contains scoped book presentation RNG patch");
         check(reader.TypeReferences.Any(t => reader.GetString(reader.GetTypeReference(t).Name) == "QuestNode_ResolveQuestName"), "quest-name RNG guard is present in packaged client");
         var move = reader.TypeDefinitions.Select(reader.GetTypeDefinition).Single(t => reader.GetString(t.Name) == "DraftedMove_GotoFeedbackPatch");
         check(move.GetMethods().Any(m => reader.GetString(reader.GetMethodDefinition(m).Name) == "CustomEndCurrentJob"), "packaged client contains synchronized drafted-move stop operation");

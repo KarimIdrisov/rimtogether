@@ -1,24 +1,29 @@
 diff --git a/Source/Client/AsyncTime/AsyncWorldTimeComp.cs b/Source/Client/AsyncTime/AsyncWorldTimeComp.cs
-index 7db59bb..2515c0c 100644
+index 7db59bb..46eb426 100644
 --- a/Source/Client/AsyncTime/AsyncWorldTimeComp.cs
 +++ b/Source/Client/AsyncTime/AsyncWorldTimeComp.cs
-@@ -216,7 +216,8 @@ public class AsyncWorldTimeComp : IExposable, ITickable
+@@ -216,7 +216,12 @@ public class AsyncWorldTimeComp : IExposable, ITickable
  
              if (cmdType == CommandType.CreateJoinPoint)
              {
 -                LongEventHandler.QueueLongEvent(CreateJoinPointAndSendIfHost, "MpCreatingJoinPoint", false, null);
 +                var joinPointId = data.Left == 0 ? 0 : data.ReadInt32();
-+                LongEventHandler.QueueLongEvent(() => CreateJoinPointAndSendIfHost(joinPointId), "MpCreatingJoinPoint", false, null);
++                // Old journals have only the ID. Only a new explicit marker changes
++                // RNG rules, including when an aborted new point is replayed later.
++                var grammarRevision = data.Left == 0 ? (byte)0 : data.ReadByte();
++                if (grammarRevision > 1) throw new InvalidOperationException("Unknown book grammar RNG revision");
++                LongEventHandler.QueueLongEvent(() => CreateJoinPointAndSendIfHost(joinPointId, grammarRevision), "MpCreatingJoinPoint", false, null);
              }
  
              if (cmdType == CommandType.InitPlayerData)
-@@ -271,13 +272,14 @@ public class AsyncWorldTimeComp : IExposable, ITickable
+@@ -271,13 +276,15 @@ public class AsyncWorldTimeComp : IExposable, ITickable
          }
      }
  
 -    private static void CreateJoinPointAndSendIfHost()
-+    private static void CreateJoinPointAndSendIfHost(int joinPointId)
++    private static void CreateJoinPointAndSendIfHost(int joinPointId, byte grammarRevision)
      {
++        if (grammarRevision > 0) Multiplayer.GameComp.grammarRngRevision = grammarRevision;
          Multiplayer.session.dataSnapshot = SaveLoad.CreateGameDataSnapshot(SaveLoad.SaveAndReload(), Multiplayer.GameComp.multifaction);
  
 -        if (!TickPatch.Simulating && !Multiplayer.IsReplay &&
@@ -31,6 +36,27 @@ index 7db59bb..2515c0c 100644
      }
  
      public void SetTimeEverywhere(TimeSpeed speed)
+diff --git a/Source/Client/Comp/Game/MultiplayerGameComp.cs b/Source/Client/Comp/Game/MultiplayerGameComp.cs
+index 2f3909c..af625d9 100644
+--- a/Source/Client/Comp/Game/MultiplayerGameComp.cs
++++ b/Source/Client/Comp/Game/MultiplayerGameComp.cs
+@@ -14,6 +14,8 @@ namespace Multiplayer.Client.Comp
+         public bool multifaction;
+         public bool debugMode;
+         public bool logDesyncTraces;
++        // Missing in old snapshots: replay those using their original RNG rules.
++        public int grammarRngRevision = 1;
+         public PauseOnLetter pauseOnLetter;
+         public TimeControl timeControl;
+         public Dictionary<int, PlayerData> playerData = new(); // player id to player data
+@@ -31,6 +33,7 @@ namespace Multiplayer.Client.Comp
+             Scribe_Values.Look(ref multifaction, "multifaction", false, true);
+             Scribe_Values.Look(ref debugMode, "debugMode");
+             Scribe_Values.Look(ref logDesyncTraces, "logDesyncTraces");
++            Scribe_Values.Look(ref grammarRngRevision, "rtGrammarRngRevision", 0);
+             Scribe_Values.Look(ref pauseOnLetter, "pauseOnLetter");
+             Scribe_Values.Look(ref timeControl, "timeControl");
+             Scribe_Values.Look(ref nextSessionId, "nextSessionId");
 diff --git a/Source/Client/ConstantTicker.cs b/Source/Client/ConstantTicker.cs
 index aa3bbb4..7996aa9 100644
 --- a/Source/Client/ConstantTicker.cs
@@ -207,14 +233,15 @@ index 0714065..c28598f 100644
  
                  // Return inner data to the pool
 diff --git a/Source/Client/MultiplayerStatic.cs b/Source/Client/MultiplayerStatic.cs
-index 49519f9..df680ea 100644
+index 49519f9..e189731 100644
 --- a/Source/Client/MultiplayerStatic.cs
 +++ b/Source/Client/MultiplayerStatic.cs
-@@ -75,6 +75,7 @@ namespace Multiplayer.Client
+@@ -75,6 +75,8 @@ namespace Multiplayer.Client
              }
  
              Log.Message($"Multiplayer version {MpVersion.Version}");
-+            Log.Message("RimTogether Guard rt-guard2 active; protocol " + MpVersion.Protocol + "; dedicated-host sync verification and watchdog enabled.");
++            Log.Message("RimTogether Guard rt-guard3 active; protocol " + MpVersion.Protocol + "; versioned book grammar RNG isolation enabled.");
++            if (Multiplayer.settings != null) Multiplayer.settings.includeReplayInDesync = true;
              Log.Message($"Arch: {RuntimeInformation.ProcessArchitecture}/OS: {RuntimeInformation.OSArchitecture}");
              Log.Message($"Player's username: {Multiplayer.username}");
  
@@ -449,7 +476,7 @@ index e2e18e1..bf6183b 100644
  
  }
 diff --git a/Source/Client/Patches/Seeds.cs b/Source/Client/Patches/Seeds.cs
-index 373af28..98de49d 100644
+index 373af28..c9f40d6 100644
 --- a/Source/Client/Patches/Seeds.cs
 +++ b/Source/Client/Patches/Seeds.cs
 @@ -6,6 +6,7 @@ using System.Collections.Generic;
@@ -460,7 +487,7 @@ index 373af28..98de49d 100644
  using Verse;
  using Verse.Grammar;
  
-@@ -168,6 +169,14 @@ namespace Multiplayer.Client
+@@ -168,24 +169,51 @@ namespace Multiplayer.Client
              yield return AccessTools.Method(typeof(GrammarResolver), nameof(GrammarResolver.Resolve));
              yield return AccessTools.Method(typeof(PawnBioAndNameGenerator), nameof(PawnBioAndNameGenerator.GeneratePawnName));
              yield return AccessTools.Method(typeof(NameGenerator), nameof(NameGenerator.GenerateName), [typeof(RulePackDef), typeof(Predicate<string>), typeof(bool), typeof(string), typeof(string), typeof(List<Rule>)]);
@@ -475,7 +502,17 @@ index 373af28..98de49d 100644
          }
  
          [HarmonyPriority(MpPriority.MpFirst)]
-@@ -179,7 +188,7 @@ namespace Multiplayer.Client
+-        static void Prefix(ref bool __state)
++        static void Prefix(ref bool __state, MethodBase __originalMethod)
+         {
+-            Rand.Element(0, 0); // advance the rng
++            // Book topic rule packs contain a language-dependent number of subject
++            // grammar calls. Text generation must not move the gameplay RNG stream.
++            // Keep author/skill/outcome generation outside this presentation-only rule.
++            if (!(BookGrammarScope.Active && __originalMethod.DeclaringType == typeof(GrammarResolver)))
++                Rand.Element(0, 0); // advance the rng
+             Rand.PushState();
+             __state = true;
          }
  
          [HarmonyPriority(MpPriority.MpLast)]
@@ -484,7 +521,28 @@ index 373af28..98de49d 100644
          {
              if (__state)
                  Rand.PopState();
-@@ -235,4 +244,34 @@ namespace Multiplayer.Client
+         }
+     }
+ 
++    [HarmonyPatch(typeof(Book), nameof(Book.GenerateBook))]
++    static class BookGrammarScope
++    {
++        [ThreadStatic] private static int depth;
++        public static bool Active => depth > 0;
++        [HarmonyPriority(MpPriority.MpFirst)]
++        static void Prefix(ref bool __state)
++        {
++            if (Multiplayer.Client == null || !(Multiplayer.game?.gameComp?.grammarRngRevision >= 1)) return;
++            depth++; __state = true;
++        }
++        [HarmonyPriority(MpPriority.MpLast)]
++        static void Finalizer(bool __state) { if (__state) depth--; }
++    }
++
+     [HarmonyPatch]
+     static class SeedPawnGraphics
+     {
+@@ -235,4 +263,34 @@ namespace Multiplayer.Client
          }
      }
  

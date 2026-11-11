@@ -8,6 +8,7 @@ public sealed class Checkpoint
     public int Schema { get; set; } = 1;
     public const string GuardTag = Contract.Tag + "+" + Contract.GuardRevision;
     public const string PreviousGuardTag = Contract.Tag + "+rt-guard1";
+    public const string Guard2Tag = Contract.Tag + "+rt-guard2";
     public string Tag { get; set; } = GuardTag;
     public int ClientProtocol { get; set; }
     public int Tick { get; set; }
@@ -38,7 +39,7 @@ public sealed class Checkpoint
         var prefix = (info.sections.Count - 1).ToString("D3");
         var result = new Checkpoint { Tick = section.end, StartingTick = section.start, HostFaction = info.playerFaction,
             SpectatorFaction = info.spectatorFaction, AsyncTime = info.asyncTime, Multifaction = info.multifaction,
-            ClientProtocol = info.protocol, Tag = info.protocol == Contract.Protocol ? GuardTag : info.protocol is 5401 or 5402 ? PreviousGuardTag : Contract.Tag,
+            ClientProtocol = info.protocol, Tag = info.protocol == Contract.Protocol ? GuardTag : info.protocol == 5403 ? Guard2Tag : info.protocol is 5401 or 5402 ? PreviousGuardTag : Contract.Tag,
             World = Compress(Read("world/" + prefix + "_save")) };
         foreach (var entry in zip.Entries.Where(e => e.FullName.StartsWith("maps/" + prefix + "_")))
         {
@@ -80,7 +81,7 @@ public sealed class Checkpoint
         if (legacy && (Tick != StartingTick || Commands.Values.Any(commands => commands.Count != 0)))
             throw new InvalidDataException("Старое сохранение содержит историю команд. Загрузите его старым Multiplayer и сделайте обычное полное MP-сохранение, затем выберите новый ZIP. История не переигрывается под изменёнными RNG-правилами.");
         var compatibleGuard = ClientProtocol == Contract.Protocol && Tag == GuardTag ||
-            ClientProtocol is 5401 or 5402 && Tag == PreviousGuardTag;
+            ClientProtocol is 5401 or 5402 && Tag == PreviousGuardTag || ClientProtocol == 5403 && Tag == Guard2Tag;
         if (!(legacy && Tag == Contract.Tag) && !compatibleGuard)
             throw new InvalidDataException("Версия checkpoint не соответствует Guard. Нужна совместимая версия программы.");
         SnapshotCompression.Validate(World); SnapshotCompression.Validate(Session, allowEmpty: true);

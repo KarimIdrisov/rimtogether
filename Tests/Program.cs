@@ -105,6 +105,7 @@ try
     BulkChecks.Run(Check, Throws);
     Checkpoint.FromReplay(SyntheticReplay.Create(Path.Combine(fixture, "compatible-guard.zip"), 5401, true)).Validate();
     Checkpoint.FromReplay(SyntheticReplay.Create(Path.Combine(fixture, "compatible-tcp-guard.zip"), 5402, true)).Validate();
+    Checkpoint.FromReplay(SyntheticReplay.Create(Path.Combine(fixture, "compatible-guard2.zip"), 5403, true)).Validate();
     Check(true, "previous guard command history remains compatible across verification-only protocol upgrade");
     var server = new MultiplayerServer(new ServerSettings()); checkpoint.Apply(server);
     server.commands.Send(CommandType.PauseAll, -1, -1, []);

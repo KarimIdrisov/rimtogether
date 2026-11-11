@@ -732,7 +732,7 @@ index c6d22e2..461f53a 100644
              if (Server.worldData.syncInfos.Count > 10)
                  Server.worldData.syncInfos.RemoveAt(0);
 diff --git a/Source/Common/PlayerManager.cs b/Source/Common/PlayerManager.cs
-index cc3da92..f9b120f 100644
+index cc3da92..429437c 100644
 --- a/Source/Common/PlayerManager.cs
 +++ b/Source/Common/PlayerManager.cs
 @@ -33,13 +33,14 @@ namespace Multiplayer.Common
@@ -771,9 +771,11 @@ index cc3da92..f9b120f 100644
              {
                  server.worldData.AbortJoinPointCreation();
                  ServerLog.Log("Aborted join point creation because the host disconnected.");
-@@ -109,14 +114,20 @@ namespace Multiplayer.Common
+@@ -108,15 +113,22 @@ namespace Multiplayer.Common
+ 
          public void OnDesync(ServerPlayer player, int tick, int diffAt)
          {
++            ServerLog.Log($"DESYNC player={player.Username} tick={tick} trace-index={diffAt}");
              player.UpdateStatus(PlayerStatus.Desynced);
 -            server.HostPlayer.SendPacket(ServerTracesPacket.Request(tick, diffAt, player.id));
 +            var authority = server.PlayingIngamePlayers.FirstOrDefault(p => p.IsHost && p.status == PlayerStatus.Playing && !p.simulating);
@@ -913,7 +915,7 @@ index 0000000..ac3cc06
 +    }
 +}
 diff --git a/Source/Common/Version.cs b/Source/Common/Version.cs
-index be9f185..c8477fd 100644
+index be9f185..2526a33 100644
 --- a/Source/Common/Version.cs
 +++ b/Source/Common/Version.cs
 @@ -6,13 +6,13 @@ namespace Multiplayer.Common
@@ -921,19 +923,19 @@ index be9f185..c8477fd 100644
      {
          public const string SimpleVersion = "0.11.5";
 -        public const int Protocol = 54;
-+        public const int Protocol = 5403; // Guard2: dedicated-host sync opinions and verification watchdog required.
++        public const int Protocol = 5404; // Guard3: versioned book-text RNG rules at a full snapshot boundary.
  
          public static readonly string? GitHash = Assembly.GetExecutingAssembly()
              .GetCustomAttributes<AssemblyMetadataAttribute>()
              .FirstOrDefault(attr => attr.Key == "GitHash")?.Value;
  
 -        public static readonly string Version = SimpleVersion + (GitHash != null ? $"+{GitHash}" : "");
-+        public static readonly string Version = SimpleVersion + "-rt-guard2" + (GitHash != null ? $"+{GitHash}" : "");
++        public static readonly string Version = SimpleVersion + "-rt-guard3" + (GitHash != null ? $"+{GitHash}" : "");
  
          public static readonly string? GitDescription = Assembly.GetExecutingAssembly()
              .GetCustomAttributes<AssemblyMetadataAttribute>()
 diff --git a/Source/Common/WorldData.cs b/Source/Common/WorldData.cs
-index a76e18d..095226d 100644
+index a76e18d..bcba431 100644
 --- a/Source/Common/WorldData.cs
 +++ b/Source/Common/WorldData.cs
 @@ -1,5 +1,6 @@
@@ -971,11 +973,11 @@ index a76e18d..095226d 100644
 +        PendingJoinPointId = ++nextJoinPointId;
 +        joinPointStartedAt = Server.NetTimer;
 +        pendingSnapshotTick = Server.gameTimer;
-+        Server.commands.Send(CommandType.CreateJoinPoint, ScheduledCommand.NoFaction, ScheduledCommand.Global, ByteWriter.GetBytes(PendingJoinPointId));
++        Server.commands.Send(CommandType.CreateJoinPoint, ScheduledCommand.NoFaction, ScheduledCommand.Global, ByteWriter.GetBytes(PendingJoinPointId, (byte)1));
          tmpMapCmds = new Dictionary<int, List<byte[]>>();
          dataSource = new TaskCompletionSource<WorldData>();
  
-@@ -48,11 +63,17 @@ public class WorldData
+@@ -48,11 +63,19 @@ public class WorldData
  
      public void EndJoinPointCreation()
      {
@@ -986,6 +988,8 @@ index a76e18d..095226d 100644
 +        PendingJoinPointId = 0;
 +        LastSnapshotAtNetTick = Server.NetTimer;
 +        SnapshotGeneration++;
++        // Opinions from the previous base may use the previous grammar RNG revision.
++        syncInfos.Clear();
          lastJoinPointAtWorkTicks = Server.workTicks;
          dataSource!.SetResult(this);
          dataSource = null;
@@ -993,7 +997,7 @@ index a76e18d..095226d 100644
      }
  
      public void AbortJoinPointCreation()
-@@ -60,13 +81,39 @@ public class WorldData
+@@ -60,13 +83,39 @@ public class WorldData
          if (!CreatingJoinPoint)
              return;
  
